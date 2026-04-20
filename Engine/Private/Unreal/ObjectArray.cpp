@@ -46,9 +46,9 @@ constexpr inline std::array FChunkedFixedUObjectArrayLayouts =
 	{
 		.ObjectsOffset = 0x20,
 		.MaxElementsOffset = 0x10,
-		.NumElementsOffset = 0x4,
+		.NumElementsOffset = 0x14,
 		.MaxChunksOffset = 0x0,
-		.NumChunksOffset = 0x14,
+		.NumChunksOffset = 0x18,
 	},
 	FChunkedFixedUObjectArrayLayout // Mutliversus
 	{
