@@ -655,18 +655,29 @@ int32 OffsetFinder::FindDefaultObjectOffset()
 int32 OffsetFinder::FindImplementedInterfacesOffset()
 {
     UEClass Interface_AssetUserDataClass = ObjectArray::FindClassFast("Interface_AssetUserData");
+    UEClass ActorComponentClass = ObjectArray::FindClassFast("ActorComponent");
 
-    const uint8_t* ActorComponentClassPtr = reinterpret_cast<const uint8_t*>(ObjectArray::FindClassFast("ActorComponent").GetAddress());
+    if (!Interface_AssetUserDataClass || !ActorComponentClass)
+        return OffsetNotFound;
 
-    for (int i = Off::UClass::ClassDefaultObject; i <= (0x350 - 0x10); i += sizeof(void*))
+    const uintptr_t ActorComponentClassPtr = reinterpret_cast<uintptr_t>(ActorComponentClass.GetAddress());
+
+    /* UClass::Interfaces comes after ClassDefaultObject */
+    const int32 SearchStart = Off::UClass::ClassDefaultObject > 0 ? Off::UClass::ClassDefaultObject : 0x28;
+
+    for (int i = SearchStart; i <= (0x350 - 0x10); i += sizeof(void*))
     {
-        const auto& ActorArray = *reinterpret_cast<const TArray<FImplementedInterface>*>(ActorComponentClassPtr + i);
+        struct { void* Data; int32 Num; int32 Max; } Array{};
 
-        if (ActorArray.IsValid() && !IsBadReadPtr(ActorArray.GetDataPtr()))
-        {
-            if (ActorArray[0].InterfaceClass == Interface_AssetUserDataClass)
-                return i;
-        }
+        if (!ReadMemory(ActorComponentClassPtr + i, &Array, sizeof(Array)))
+            break;
+
+        if (!IsPlausiblePointer(Array.Data) || Array.Num <= 0 || Array.Num > 0x100 || Array.Max < Array.Num)
+            continue;
+
+        /* FImplementedInterface { UClass* Class; int32 PointerOffset; bool bImplementedByK2; } */
+        if (SafeRead<void*>(Array.Data) == Interface_AssetUserDataClass.GetAddress())
+            return i;
     }
 
     return OffsetNotFound;
@@ -844,17 +855,25 @@ int32 OffsetFinder::FindLevelActorsOffset()
     SearchStart = sizeof(UObject) + sizeof(FURL)
     SearchEnd = offsetof(ULevel, OwningWorld)
     */
-    int32 SearchStart = ObjectArray::FindClassFast("Object").GetStructSize() + ObjectArray::FindObjectFast<UEStruct>("URL", EClassCastFlags::Struct).GetStructSize();
-    int32 SearchEnd = Level.GetClass().FindMember("OwningWorld").GetOffset();
+    const UEStruct ObjectClass = ObjectArray::FindClassFast("Object");
+    const UEStruct URLStruct = ObjectArray::FindObjectFast<UEStruct>("URL", EClassCastFlags::Struct);
+    const UEProperty OwningWorld = Level.GetClass().FindMember("OwningWorld");
+
+    if (!ObjectClass || !URLStruct || !OwningWorld)
+        return OffsetNotFound;
+
+    const int32 SearchStart = ObjectClass.GetStructSize() + URLStruct.GetStructSize();
+    const int32 SearchEnd = OwningWorld.GetOffset();
 
     for (int i = SearchStart; i <= (SearchEnd - 0x10); i += sizeof(void*))
     {
-        const TArray<void*>& ActorArray = *reinterpret_cast<TArray<void*>*>(Lvl + i);
+        struct { void* Data; int32 Num; int32 Max; } ActorArray{};
 
-        if (ActorArray.IsValid() && !IsBadReadPtr(ActorArray.GetDataPtr()))
-        {
+        if (!ReadMemory(Lvl + i, &ActorArray, sizeof(ActorArray)))
+            break;
+
+        if (IsPlausiblePointer(ActorArray.Data) && ActorArray.Num > 0 && ActorArray.Max >= ActorArray.Num && !IsBadReadPtr(ActorArray.Data))
             return i;
-        }
     }
 
     return OffsetNotFound;

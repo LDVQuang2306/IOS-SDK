@@ -4,6 +4,8 @@
 #include <format.h>
 
 #include "../../../Engine/Public/Unreal/ObjectArray.h"
+#include "../../../Engine/Public/Unreal/NameArray.h"
+#include "../../../Engine/Public/Unreal/DeltaForce.h"
 #include "../../Public/Generators/CppGenerator.h"
 #include "../../Public/Wrappers/MemberWrappers.h"
 #include "../../Public/Managers/MemberManager.h"
@@ -1616,6 +1618,9 @@ void CppGenerator::InitPredefinedMembers()
 {
 	static auto SortMembers = [](std::vector<PredefinedMember>& Members) -> void
 	{
+		/* Offsets that couldn't be found (-1, e.g. UClass::CastFlags on Delta Force) must not end up as members at negative offsets */
+		std::erase_if(Members, [](const PredefinedMember& Member) { return !Member.bIsStatic && Member.Offset < 0; });
+
 		std::sort(Members.begin(), Members.end(), ComparePredefinedMembers);
 	};
 
@@ -1633,13 +1638,13 @@ void CppGenerator::InitPredefinedMembers()
 	};
 
 
-	if (Off::InSDK::ULevel::Actors != -1)
+	UEClass Level = ObjectArray::FindClassFast("Level");
+
+	if (Level == nullptr)
+		Level = ObjectArray::FindClassFast("level");
+
+	if (Off::InSDK::ULevel::Actors != -1 && Level)
 	{
-		UEClass Level = ObjectArray::FindClassFast("Level");
-
-		if (Level == nullptr)
-			Level = ObjectArray::FindClassFast("level");
-
 		PredefinedElements& ULevelPredefs = PredefinedMembers[Level.GetIndex()];
 		ULevelPredefs.Members =
 		{
@@ -1653,15 +1658,18 @@ void CppGenerator::InitPredefinedMembers()
 
 	UEClass DataTable = ObjectArray::FindClassFast("DataTable");
 
-	PredefinedElements& UDataTablePredefs = PredefinedMembers[DataTable.GetIndex()];
-	UDataTablePredefs.Members =
+	if (DataTable && Off::InSDK::UDataTable::RowMap > 0)
 	{
-		PredefinedMember {
-			.Comment = "So, here's a RowMap. Good luck with it.",
-			.Type = "TMap<class FName, uint8*>", .Name = "RowMap", .Offset = Off::InSDK::UDataTable::RowMap, .Size = 0x50, .ArrayDim = 0x1, .Alignment = 0x8,
-			.bIsStatic = false, .bIsZeroSizeMember = false, .bIsBitField = false, .BitIndex = 0xFF
-		},
-	};
+		PredefinedElements& UDataTablePredefs = PredefinedMembers[DataTable.GetIndex()];
+		UDataTablePredefs.Members =
+		{
+			PredefinedMember {
+				.Comment = "So, here's a RowMap. Good luck with it.",
+				.Type = "TMap<class FName, uint8*>", .Name = "RowMap", .Offset = Off::InSDK::UDataTable::RowMap, .Size = 0x50, .ArrayDim = 0x1, .Alignment = 0x8,
+				.bIsStatic = false, .bIsZeroSizeMember = false, .bIsBitField = false, .BitIndex = 0xFF
+			},
+		};
+	}
 
 	PredefinedElements& UObjectPredefs = PredefinedMembers[ObjectArray::FindClassFast("Object").GetIndex()];
 	UObjectPredefs.Members = 
@@ -1772,7 +1780,7 @@ void CppGenerator::InitPredefinedMembers()
 		},
 		PredefinedMember {
 			.Comment = "NOT AUTO-GENERATED PROPERTY",
-			.Type = "uint32", .Name = "FunctionFlags", .Offset = Off::UFunction::FunctionFlags, .Size = 0x08, .ArrayDim = 0x1, .Alignment = 0x8,
+			.Type = "uint32", .Name = "FunctionFlags", .Offset = Off::UFunction::FunctionFlags, .Size = 0x04, .ArrayDim = 0x1, .Alignment = 0x4,
 			.bIsStatic = false, .bIsZeroSizeMember = false, .bIsBitField = false, .BitIndex = 0xFF
 		},
 		PredefinedMember {
@@ -1787,7 +1795,7 @@ void CppGenerator::InitPredefinedMembers()
 	{
 		PredefinedMember {
 			.Comment = "NOT AUTO-GENERATED PROPERTY",
-			.Type = "enum class EClassCastFlags", .Name = "CastFlags", .Offset = Off::UClass::CastFlags, .Size = 0x08, .ArrayDim = 0x1, .Alignment = 0x8,
+			.Type = "EClassCastFlags", .Name = "CastFlags", .Offset = Off::UClass::CastFlags, .Size = 0x08, .ArrayDim = 0x1, .Alignment = 0x8,
 			.bIsStatic = false, .bIsZeroSizeMember = false, .bIsBitField = false, .BitIndex = 0xFF
 		},
 		PredefinedMember {
@@ -1973,6 +1981,7 @@ void CppGenerator::InitPredefinedMembers()
 	SortMembers(DelegatePropertyMembers);
 	SortMembers(MapPropertyMembers);
 	SortMembers(SetPropertyMembers);
+	SortMembers(EnumPropertyMembers);
 	SortMembers(FieldPathPropertyMembers);
 	SortMembers(OptionalPropertyMembers);
 
@@ -2188,6 +2197,20 @@ void CppGenerator::InitPredefinedMembers()
 
 void CppGenerator::InitPredefinedFunctions()
 {
+	/* A game can lack some of these classes/structs. Writing predefined functions for a missing one must not dereference a null object. */
+	static auto PredefinedElementsOf = [](UEObject Object) -> PredefinedElements&
+	{
+		static PredefinedElements Discarded;
+
+		if (!Object)
+		{
+			Discarded = PredefinedElements();
+			return Discarded;
+		}
+
+		return PredefinedMembers[Object.GetIndex()];
+	};
+
 	static auto SortFunctions = [](std::vector<PredefinedFunction>& Functions) -> void
 	{
 		std::sort(Functions.begin(), Functions.end(), ComparePredefinedFunctions);
@@ -2410,7 +2433,7 @@ R"({
 	};
 
 
-	PredefinedElements& UEnginePredefs = PredefinedMembers[ObjectArray::FindClassFast("Engine").GetIndex()];
+	PredefinedElements& UEnginePredefs = PredefinedElementsOf(ObjectArray::FindClassFast("Engine"));
 
 	UEnginePredefs.Functions =
 	{
@@ -2446,7 +2469,7 @@ R"({
 	};
 
 
-	PredefinedElements& UGameEnginePredefs = PredefinedMembers[ObjectArray::FindClassFast("GameEngine").GetIndex()];
+	PredefinedElements& UGameEnginePredefs = PredefinedElementsOf(ObjectArray::FindClassFast("GameEngine"));
 
 	UGameEnginePredefs.Functions =
 	{
@@ -2462,7 +2485,7 @@ R"({
 	};
 
 
-	PredefinedElements& UWorldPredefs = PredefinedMembers[ObjectArray::FindClassFast("World").GetIndex()];
+	PredefinedElements& UWorldPredefs = PredefinedElementsOf(ObjectArray::FindClassFast("World"));
 
 	constexpr const char* GetWorldThroughGWorldCode = R"(
 	if constexpr (Offsets::GWorld != 0)
@@ -2492,7 +2515,7 @@ fmt::format(R"({{{}
 
 	UEStruct Vector = ObjectArray::FindObjectFast<UEStruct>("Vector");
 
-	PredefinedElements& FVectorPredefs = PredefinedMembers[Vector.GetIndex()];
+	PredefinedElements& FVectorPredefs = PredefinedElementsOf(Vector);
 
 	FVectorPredefs.Members.push_back(PredefinedMember{
 		PredefinedMember{
@@ -2698,7 +2721,7 @@ R"({
 
 	UEStruct Vector2D = ObjectArray::FindObjectFast<UEStruct>("Vector2D");
 
-	PredefinedElements& FVector2DPredefs = PredefinedMembers[Vector2D.GetIndex()];
+	PredefinedElements& FVector2DPredefs = PredefinedElementsOf(Vector2D);
 	FVector2DPredefs.Members.push_back(PredefinedMember{
 		PredefinedMember{
 			.Comment = "NOT AUTO-GENERATED PROPERTY",
@@ -2912,16 +2935,16 @@ void CppGenerator::GenerateBasicFiles(StreamType& BasicHpp, StreamType& BasicCpp
 		std::sort(Members.begin(), Members.end(), ComparePredefinedMembers);
 	};
 
-	std::string CustomIncludes = R"(#define VC_EXTRALEAN
-#define WIN32_LEAN_AND_MEAN
-
-#include <string>
+	std::string CustomIncludes = R"(#include <string>
+#include <cstring>
+#include <cmath>
 #include <functional>
 #include <type_traits>
 )";
 
+	/* iOS SDK: the image base comes from dyld, there is no <Windows.h> */
 	WriteFileHead(BasicHpp, nullptr, EFileType::BasicHpp, "Basic file containing structs required by the SDK", CustomIncludes);
-	WriteFileHead(BasicCpp, nullptr, EFileType::BasicCpp, "Basic file containing function-implementations from Basic.hpp", "#include <Windows.h>");
+	WriteFileHead(BasicCpp, nullptr, EFileType::BasicCpp, "Basic file containing function-implementations from Basic.hpp", "#include <mach-o/dyld.h>\n#include <mach-o/loader.h>");
 
 
 	/* use namespace of UnrealContainers */
@@ -2949,6 +2972,12 @@ namespace Offsets
 	constexpr int32 ProcessEventIdx   = 0x{:08X};
 }}
 )", Off::InSDK::ObjArray::GObjects, Off::InSDK::Name::AppendNameToString, Off::InSDK::NameArray::GNames, Off::InSDK::World::GWorld, Off::InSDK::ProcessEvent::PEOffset, Off::InSDK::ProcessEvent::PEIndex);
+
+	if (NameArray::IsNameEncrypted())
+	{
+		BasicHpp << "\n/* FNameEntry strings of this game are obfuscated, FNameEntry::GetString() decrypts them. */\n";
+		BasicHpp << DeltaForce::GetDecryptionSource();
+	}
 
 
 
@@ -3156,7 +3185,7 @@ class UClass* StaticBPGeneratedClassImpl()
 		if (ClassIdx == 0x0) [[unlikely]]
 			return SetClassIndex(BasicFilesImpleUtils::FindClassByFullName(Name), ClassIdx, ClassName);
 
-		UClass* ClassObj = static_cast<UClass*>(BasicFilesImpleUtils::GetObjectByIndex(ClassIdx));
+		UClass* ClassObj = reinterpret_cast<UClass*>(BasicFilesImpleUtils::GetObjectByIndex(ClassIdx));
 
 		/* Could use cast flags too to save some string comparisons */
 		if (!ClassObj || BasicFilesImpleUtils::GetObjFNameAsUInt64(ClassObj) != ClassName)
@@ -3169,7 +3198,7 @@ class UClass* StaticBPGeneratedClassImpl()
 		if (ClassIdx == 0x0) [[unlikely]]
 			return SetClassIndex(BasicFilesImpleUtils::FindClassByName(Name), ClassIdx, ClassName);
 
-		UClass* ClassObj = static_cast<UClass*>(BasicFilesImpleUtils::GetObjectByIndex(ClassIdx));
+		UClass* ClassObj = reinterpret_cast<UClass*>(BasicFilesImpleUtils::GetObjectByIndex(ClassIdx));
 
 		/* Could use cast flags too to save some string comparisons */
 		if (!ClassObj || BasicFilesImpleUtils::GetObjFNameAsUInt64(ClassObj) != ClassName)
@@ -3476,7 +3505,7 @@ public:)";
 		},
 		PredefinedMember {
 			.Comment = "NOT AUTO-GENERATED PROPERTY",
-			.Type = "wchar_t", .Name = "WideName", .Offset = 0x0, .Size = 0x02, .ArrayDim = 0x400, .Alignment = 0x8,
+			.Type = "char16_t", .Name = "WideName", .Offset = 0x0, .Size = 0x02, .ArrayDim = 0x400, .Alignment = 0x8,
 			.bIsStatic = false, .bIsZeroSizeMember = false, .bIsBitField = false, .BitIndex = 0xFF
 		},
 	};
@@ -3526,7 +3555,7 @@ R"({
 R"({
 	if (IsWide())
 	{
-		return UtfN::Utf16StringToUtf8String<std::string>(Name.WideName, wcslen(Name.WideName));
+		return UtfN::Utf16StringToUtf8String<std::string>(Name.WideName, static_cast<int>(std::char_traits<char16_t>::length(Name.WideName)));
 	}
 
 	return Name.AnsiName;
@@ -3635,7 +3664,7 @@ R"({
 				.CustomComment = "",
 				.ReturnType = "int32", .NameWithParams = "GetTypedId()", .Body = 
 R"({
-	return reinterpret_cast<int32>(Id);
+	return *reinterpret_cast<const int32*>(Id);
 })",
 				.bIsStatic = false, .bIsConst = true, .bIsBodyInline = true
 			},
@@ -3643,7 +3672,7 @@ R"({
 				.CustomComment = "",
 				.ReturnType = "uint32", .NameWithParams = "GetNumber()", .Body =
 R"({
-	return reinterpret_cast<uint32>(Number);
+	return *reinterpret_cast<const uint32*>(Number);
 })",
 				.bIsStatic = false, .bIsConst = true, .bIsBodyInline = true
 			},
@@ -3719,14 +3748,29 @@ R"({
 			PredefinedFunction {
 				.CustomComment = "",
 				.ReturnType = "std::string", .NameWithParams = "GetString()", .Body =
-R"({
+(NameArray::IsNameEncrypted() ? R"({
+	if (IsWide())
+	{
+		char16_t WideName[0x400];
+		memcpy(WideName, Name.WideName, Header.Len * sizeof(char16_t));
+		DeltaForceNames::DecryptWide(WideName, Header.Len);
+
+		return UtfN::Utf16StringToUtf8String<std::string>(WideName, Header.Len);
+	}
+
+	char AnsiName[0x400];
+	memcpy(AnsiName, Name.AnsiName, Header.Len);
+	DeltaForceNames::DecryptAnsi(AnsiName, Header.Len);
+
+	return std::string(AnsiName, Header.Len);
+})" : R"({
 	if (IsWide())
 	{
 		return UtfN::Utf16StringToUtf8String<std::string>(Name.WideName, Header.Len);
 	}
 
 	return std::string(Name.AnsiName, Header.Len);
-})",
+})"),
 				.bIsStatic = false, .bIsConst = true, .bIsBodyInline = true
 			},
 		};
@@ -3734,8 +3778,10 @@ R"({
 		constexpr int32 SizeOfChunkPtrs = 0x2000 * 0x8;
 
 		/* class FNamePool */
+		const int32 FNamePoolSize = (std::max)({ Off::NameArray::ChunksStart + SizeOfChunkPtrs, Off::NameArray::ByteCursor + 0x4, Off::NameArray::MaxChunkIndex + 0x4 });
+
 		PredefinedStruct FNamePool = PredefinedStruct{
-			.UniqueName = "FNamePool", .Size = Off::NameArray::ChunksStart + SizeOfChunkPtrs, .Alignment = 0x8, .bUseExplictAlignment = false, .bIsFinal = true, .bIsClass = true, .bIsUnion = false, .Super = nullptr
+			.UniqueName = "FNamePool", .Size = FNamePoolSize, .Alignment = 0x8, .bUseExplictAlignment = false, .bIsFinal = true, .bIsClass = true, .bIsUnion = false, .Super = nullptr
 		};
 
 		FNamePool.Properties =
@@ -3758,12 +3804,12 @@ R"({
 
 			PredefinedMember {
 				.Comment = "NOT AUTO-GENERATED PROPERTY",
-				.Type = "uint32", .Name = "CurrentBlock", .Offset = Off::NameArray::MaxChunkIndex, .Size = 0x4, .ArrayDim = 0x1, .Alignment = 0x2,
+				.Type = "uint32", .Name = "CurrentBlock", .Offset = Off::NameArray::MaxChunkIndex, .Size = 0x4, .ArrayDim = 0x1, .Alignment = 0x4,
 				.bIsStatic = false, .bIsZeroSizeMember = false, .bIsBitField = false, .BitIndex = 0xFF,
 			},
 			PredefinedMember {
 				.Comment = "NOT AUTO-GENERATED PROPERTY",
-				.Type = "uint32", .Name = "CurrentByteCursor", .Offset = Off::NameArray::ByteCursor, .Size = 0x08, .ArrayDim = 0x1, .Alignment = 0x8,
+				.Type = "uint32", .Name = "CurrentByteCursor", .Offset = Off::NameArray::ByteCursor, .Size = 0x04, .ArrayDim = 0x1, .Alignment = 0x4,
 				.bIsStatic = false, .bIsZeroSizeMember = false, .bIsBitField = false, .BitIndex = 0xFF
 			},
 			PredefinedMember {
@@ -3779,7 +3825,7 @@ R"({
 				.CustomComment = "",
 				.ReturnType = "bool", .NameWithParams = "IsValidIndex(int32 Index, int32 ChunkIdx, int32 InChunkIdx)", .Body =
 R"({
-	return ChunkIdx <= CurrentBlock && !(ChunkIdx == CurrentBlock && InChunkIdx > CurrentByteCursor);
+	return Index >= 0 && ChunkIdx <= static_cast<int32>(CurrentBlock) && !(ChunkIdx == static_cast<int32>(CurrentBlock) && static_cast<uint32>(InChunkIdx * FNameEntryStride) >= CurrentByteCursor);
 }
 )",
 				.bIsStatic = false, .bIsConst = true, .bIsBodyInline = true
@@ -3804,6 +3850,9 @@ R"({
 		GenerateStruct(&FNameEntryHeader, BasicHpp, BasicCpp, BasicHpp);
 		GenerateStruct(&FStringData, BasicHpp, BasicCpp, BasicHpp);
 		GenerateStruct(&FNameEntry, BasicHpp, BasicCpp, BasicHpp);
+
+		/* Delta Force keeps Blocks[] before CurrentByteCursor/CurrentBlock, members must be emitted in offset order */
+		SortMembers(FNamePool.Properties);
 		GenerateStruct(&FNamePool, BasicHpp, BasicCpp, BasicHpp);
 	}
 
@@ -4655,7 +4704,7 @@ public:
 	{
 		PredefinedMember {
 			.Comment = "NOT AUTO-GENERATED PROPERTY",
-			.Type = "struct InvalidUseOfTDelegate", .Name = "TemplateParamIsNotAFunctionSignature", .Offset = 0x0, .Size = 0x0, .ArrayDim = 0x1, .Alignment = 0x1,
+			.Type = "typename std::conditional<(sizeof(FunctionSignature*) > 0), struct InvalidUseOfTDelegate, int>::type", .Name = "TemplateParamIsNotAFunctionSignature", .Offset = 0x0, .Size = 0x0, .ArrayDim = 0x1, .Alignment = 0x1,
 			.bIsStatic = false, .bIsZeroSizeMember = false, .bIsBitField = false, .BitIndex = 0xFF
 		},
 	};
@@ -4690,7 +4739,7 @@ public:
 	{
 		PredefinedMember {
 			.Comment = "NOT AUTO-GENERATED PROPERTY",
-			.Type = "struct InvalidUseOfTMulticastInlineDelegate", .Name = "TemplateParamIsNotAFunctionSignature", .Offset = 0x0, .Size = ScriptDelegateSize, .ArrayDim = 0x1, .Alignment = 0x1,
+			.Type = "typename std::conditional<(sizeof(FunctionSignature*) > 0), struct InvalidUseOfTMulticastInlineDelegate, int>::type", .Name = "TemplateParamIsNotAFunctionSignature", .Offset = 0x0, .Size = ScriptDelegateSize, .ArrayDim = 0x1, .Alignment = 0x1,
 			.bIsStatic = false, .bIsZeroSizeMember = false, .bIsBitField = false, .BitIndex = 0xFF
 		},
 	};
@@ -4727,7 +4776,8 @@ inline constexpr EEnumClass operator|(EEnumClass Left, EEnumClass Right)								
 																																										\
 inline constexpr EEnumClass& operator|=(EEnumClass& Left, EEnumClass Right)																								\
 {																																										\
-	return (EEnumClass&)((std::underlying_type<EEnumClass>::type&)(Left) |= (std::underlying_type<EEnumClass>::type)(Right));											\
+	Left = Left | Right;																																				\
+	return Left;																																						\
 }																																										\
 																																										\
 inline bool operator&(EEnumClass Left, EEnumClass Right)																												\
@@ -4739,7 +4789,7 @@ inline bool operator&(EEnumClass Left, EEnumClass Right)																								
 	/* enum class EObjectFlags */
 	BasicHpp <<
 		R"(
-enum class EObjectFlags : int32
+enum class EObjectFlags : uint32
 {
 	NoFlags							= 0x00000000,
 
@@ -5311,7 +5361,7 @@ namespace UC
 	class TArray
 	{
 	private:
-		template<typename ArrayElementType>
+		template<typename>
 		friend class TAllocatedArray;
 
 		template<typename SparseArrayElementType>
@@ -5409,7 +5459,8 @@ namespace UC
 		template<typename T> friend Iterators::TArrayIterator<T> end  (const TArray& Array);
 	};
 
-	class FString : public TArray<wchar_t>
+	/* TCHAR of UE4.21+ on iOS/Android is a 2-byte UTF-16 code unit (wchar_t is 4 bytes on iOS) */
+	class FString : public TArray<char16_t>
 	{
 	public:
 		friend std::ostream& operator<<(std::ostream& Stream, const UC::FString& Str) { return Stream << Str.ToString(); }
@@ -5417,11 +5468,11 @@ namespace UC
 	public:
 		using TArray::TArray;
 
-		FString(const wchar_t* Str)
+		FString(const char16_t* Str)
 		{
-			const uint32 NullTerminatedLength = static_cast<uint32>(wcslen(Str) + 0x1);
+			const uint32 NullTerminatedLength = static_cast<uint32>(std::char_traits<char16_t>::length(Str) + 0x1);
 
-			Data = const_cast<wchar_t*>(Str);
+			Data = const_cast<char16_t*>(Str);
 			NumElements = NullTerminatedLength;
 			MaxElements = NullTerminatedLength;
 		}
@@ -5437,21 +5488,21 @@ namespace UC
 			return "";
 		}
 
-		inline UnrealString ToWString() const
+		inline std::u16string ToWString() const
 		{
 			if (*this)
-				return UnrealString(Data);
+				return std::u16string(Data, NumElements - 1); // Exclude null-terminator
 
-			return TEXT("");
+			return u"";
 		}
 
 	public:
-		inline       wchar_t* CStr()       { return Data; }
-		inline const wchar_t* CStr() const { return Data; }
+		inline       char16_t* CStr()       { return Data; }
+		inline const char16_t* CStr() const { return Data; }
 
 	public:
-		inline bool operator==(const FString& Other) const { return Other ? NumElements == Other.NumElements && wcscmp(Data, Other.Data) == 0 : false; }
-		inline bool operator!=(const FString& Other) const { return Other ? NumElements != Other.NumElements || wcscmp(Data, Other.Data) != 0 : true; }
+		inline bool operator==(const FString& Other) const { return Other ? NumElements == Other.NumElements && std::char_traits<char16_t>::compare(Data, Other.Data, NumElements) == 0 : false; }
+		inline bool operator!=(const FString& Other) const { return !(*this == Other); }
 	};
 
 	/*
@@ -5502,7 +5553,7 @@ namespace UC
 	public:
 		FAllocatedString(int32 Size)
 		{
-			Data = static_cast<wchar_t*>(malloc(Size * sizeof(wchar_t)));
+			Data = static_cast<char16_t*>(malloc(Size * sizeof(char16_t)));
 			NumElements = 0x0;
 			MaxElements = Size;
 		}
@@ -5918,6 +5969,7 @@ void CppGenerator::GenerateUnicodeLib(StreamType& UnicodeLib) {
 
 #include <string>
 #include <limits>
+#include <climits>
 #include <cstdint>
 #include <type_traits>
 
@@ -6206,7 +6258,7 @@ namespace UtfN
 					typename = decltype(std::begin(std::declval<container_type>())), // Has begin
 					typename = decltype(std::end(std::declval<container_type>())),   // Has end
 					typename iterator_deref_type = decltype(*std::end(std::declval<container_type>())), // Iterator can be dereferenced
-					typename = std::enable_if<sizeof(std::decay<iterator_deref_type>::type) == utf_char_type::GetCodepointSize()>::type // Return-value of derferenced iterator has the same size as one codepoint
+					typename = typename std::enable_if<sizeof(typename std::decay<iterator_deref_type>::type) == utf_char_type::GetCodepointSize()>::type // Return-value of derferenced iterator has the same size as one codepoint
 				>
 				explicit UTF_CONSTEXPR utf_char_iterator_base(container_type& Container)
 					: CurrentIterator(std::begin(Container)), NextCharStartIterator(std::begin(Container)), EndIterator(std::end(Container))
@@ -6665,12 +6717,12 @@ namespace UtfN
 	template<
 		typename codepoint_iterator_type,
 		typename iterator_deref_type = decltype(*std::declval<codepoint_iterator_type>()), // Iterator can be dereferenced
-		typename = typename std::enable_if<sizeof(std::decay<iterator_deref_type>::type) == utf_char8::GetCodepointSize()>::type // Return-value of derferenced iterator has the same size as one codepoint
+		typename = typename std::enable_if<sizeof(typename std::decay<iterator_deref_type>::type) == utf_char8::GetCodepointSize()>::type // Return-value of derferenced iterator has the same size as one codepoint
 	>
 	class utf8_iterator : public UtfImpl::Iterator::utf_char_iterator_base<utf8_iterator<codepoint_iterator_type>, codepoint_iterator_type, utf_char8>
 	{
 	private:
-		typedef typename utf8_iterator<codepoint_iterator_type> own_type;
+		typedef utf8_iterator<codepoint_iterator_type> own_type;
 
 		friend UtfImpl::Iterator::utf_char_iterator_base_child_acessor<own_type>;
 
@@ -6710,12 +6762,12 @@ namespace UtfN
 	template<
 		typename codepoint_iterator_type,
 		typename iterator_deref_type = decltype(*std::declval<codepoint_iterator_type>()), // Iterator can be dereferenced
-		typename = typename std::enable_if<sizeof(std::decay<iterator_deref_type>::type) == utf_char16::GetCodepointSize()>::type // Return-value of derferenced iterator has the same size as one codepoint
+		typename = typename std::enable_if<sizeof(typename std::decay<iterator_deref_type>::type) == utf_char16::GetCodepointSize()>::type // Return-value of derferenced iterator has the same size as one codepoint
 	>
 	class utf16_iterator : public UtfImpl::Iterator::utf_char_iterator_base<utf16_iterator<codepoint_iterator_type>, codepoint_iterator_type, utf_char16>
 	{
 	private:
-		typedef typename utf16_iterator<codepoint_iterator_type> own_type;
+		typedef utf16_iterator<codepoint_iterator_type> own_type;
 
 		friend UtfImpl::Iterator::utf_char_iterator_base_child_acessor<own_type>;
 
@@ -6766,12 +6818,12 @@ namespace UtfN
 	template<
 		typename codepoint_iterator_type,
 		typename iterator_deref_type = decltype(*std::declval<codepoint_iterator_type>()), // Iterator can be dereferenced
-		typename = typename std::enable_if<sizeof(std::decay<iterator_deref_type>::type) == utf_char32::GetCodepointSize()>::type // Return-value of derferenced iterator has the same size as one codepoint
+		typename = typename std::enable_if<sizeof(typename std::decay<iterator_deref_type>::type) == utf_char32::GetCodepointSize()>::type // Return-value of derferenced iterator has the same size as one codepoint
 	>
 	class utf32_iterator : public UtfImpl::Iterator::utf_char_iterator_base<utf32_iterator<codepoint_iterator_type>, codepoint_iterator_type, utf_char32>
 	{
 	private:
-		typedef typename utf32_iterator<codepoint_iterator_type> own_type;
+		typedef utf32_iterator<codepoint_iterator_type> own_type;
 
 		friend UtfImpl::Iterator::utf_char_iterator_base_child_acessor<own_type>;
 
@@ -7009,7 +7061,7 @@ namespace UtfN
 	UTF_CONSTEXPR20 UTF_NODISCARD
 		utf16_char_string Utf8StringToUtf16String(utf8_char_type(&StringToConvert)[cstr_lenght])
 	{
-		return Utf32StringToUtf16String<utf16_char_string>(utf8_iterator<const utf8_char_type*>(std::begin(StringToConvert), std::end(StringToConvert)));
+		return Utf8StringToUtf16String<utf16_char_string>(utf8_iterator<const utf8_char_type*>(std::begin(StringToConvert), std::end(StringToConvert)));
 	}
 
 	template<typename utf16_char_string, typename utf8_char_type,
@@ -7018,7 +7070,7 @@ namespace UtfN
 	UTF_CONSTEXPR20 UTF_NODISCARD
 		utf16_char_string Utf8StringToUtf16String(const utf8_char_type* StringToConvert, int NonNullTermiantedLength)
 	{
-		return Utf32StringToUtf16String<utf16_char_string>(utf32_iterator<const utf8_char_type*>(StringToConvert, StringToConvert + NonNullTermiantedLength));
+		return Utf8StringToUtf16String<utf16_char_string>(utf8_iterator<const utf8_char_type*>(StringToConvert, StringToConvert + NonNullTermiantedLength));
 	}
 
 
@@ -7174,7 +7226,7 @@ namespace UtfN
 	}
 
 
-	template<typename wstring_type = UnrealString, typename string_type = std::string,
+	template<typename wstring_type = std::u16string, typename string_type = std::string,
 		typename = decltype(std::begin(std::declval<wstring_type>())), // has 'begin()'
 		typename = decltype(std::end(std::declval<wstring_type>()))    // has 'end()'
 	>
@@ -7199,7 +7251,7 @@ namespace UtfN
 		}
 	}
 
-	template<typename string_type = std::string, typename wstring_type = UnrealString,
+	template<typename string_type = std::string, typename wstring_type = std::u16string,
 		typename = decltype(std::begin(std::declval<string_type>())), // has 'begin()'
 		typename = decltype(std::end(std::declval<string_type>()))    // has 'end()'
 	>

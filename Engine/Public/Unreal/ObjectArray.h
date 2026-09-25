@@ -45,6 +45,11 @@ public:
 	static void Init(int32 GObjectsOffset, const FFixedUObjectArrayLayout& ObjectArrayLayout = FFixedUObjectArrayLayout(), const char* const ModuleName = nullptr);
 	static void Init(int32 GObjectsOffset, int32 ElementsPerChunk, const FChunkedFixedUObjectArrayLayout& ObjectArrayLayout = FChunkedFixedUObjectArrayLayout(), const char* const ModuleName = nullptr);
 
+	/* Chunked GUObjectArray whose layout and FUObjectItem geometry are already known and validated (no heuristics). */
+	static void InitWithKnownLayout(uint8* GObjectsAddress, int32 GObjectsOffset, int32 ElementsPerChunk, const FChunkedFixedUObjectArrayLayout& ObjectArrayLayout, uint32 ItemSize, uint32 ItemObjectOffset);
+
+	static inline bool IsInitialized() { return GObjects != nullptr && ByIndex != nullptr; }
+
 	static void DumpObjects(const fs::path& Path, bool bWithPathname = false);
 	static void DumpObjectsWithProperties(const fs::path& Path, bool bWithPathname = false);
 

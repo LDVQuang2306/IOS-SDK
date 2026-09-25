@@ -1,5 +1,6 @@
 #pragma once
 
+#include <climits>
 #include <unordered_map>
 #include <unordered_set>
 

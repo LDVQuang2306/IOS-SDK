@@ -79,7 +79,7 @@ private:
 	inline static UnrealString(*ToStr)(const void* Name) = nullptr;
 
 private:
-	const uint8* Address;
+	const uint8* Address = nullptr;
 
 public:
 	FName() = default;
@@ -91,6 +91,9 @@ public:
 	static void InitFallback();
 
 	static void Init(int32 OverrideOffset, EOffsetOverrideType OverrideType = EOffsetOverrideType::AppendString, bool bIsNamePool = false, const char* const ModuleName = nullptr);
+
+	/* Resolve names through an already initialized NameArray (NameArray::InitWithKnownNamePoolLayout), with a per-index cache. Never calls game code. */
+	static void InitWithNameArray();
 
 public:
 	inline const void* GetAddress() const { return Address; }

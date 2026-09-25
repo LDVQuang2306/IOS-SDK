@@ -3,6 +3,8 @@
 #include <iostream>
 #include <vector>
 #include <string>
+#include <cstring>
+#include <cstdint>
 #include <algorithm>
 #include <functional>
 #include <tuple>
@@ -200,41 +202,126 @@ struct MachImageInfo {
     const struct mach_header_64* Header;
 };
 
-inline MachImageInfo GetImageBaseAndSize(const char* ImageName = nullptr)
+/* A loaded segment of a Mach-O image, already relocated by the ASLR slide. [Begin, End) */
+struct MachSegment {
+    char Name[17];
+    uintptr_t Begin;
+    uintptr_t End;
+    vm_prot_t InitProt;
+};
+
+inline const char* GetImageFileName(const char* Path)
 {
-    uint32_t Count = _dyld_image_count();
-    for (uint32_t i = 0; i < Count; i++)
-    {
-        const char* Name = _dyld_get_image_name(i);
-        if (!ImageName || strstr(Name, ImageName))
-        {
-            const auto* Header = (const struct mach_header_64*)_dyld_get_image_header(i);
-            
-            // Calculate real image size by iterating segments
-            uintptr_t MinAddr = ~0UL;
-            uintptr_t MaxAddr = 0;
-            auto* Cmd = (const struct load_command*)(Header + 1);
-            
-            for (uint32_t c = 0; c < Header->ncmds; c++)
-            {
-                if (Cmd->cmd == LC_SEGMENT_64) {
-                    auto* Seg = (const struct segment_command_64*)Cmd;
-                    if (Seg->vmaddr < MinAddr) MinAddr = Seg->vmaddr;
-                    if ((Seg->vmaddr + Seg->vmsize) > MaxAddr) MaxAddr = Seg->vmaddr + Seg->vmsize;
-                }
-                Cmd = (const struct load_command*)((uintptr_t)Cmd + Cmd->cmdsize);
-            }
-            return { (uintptr_t)Header, (size_t)(MaxAddr - MinAddr), Header };
-        }
-    }
-    return { 0, 0, nullptr };
+    if (!Path)
+        return "";
+
+    const char* LastSlash = strrchr(Path, '/');
+    return LastSlash ? LastSlash + 1 : Path;
 }
 
-inline uintptr_t GetModuleBase(const char* SearchModuleName = nullptr) {
-    if (SearchModuleName == nullptr)
-        return (uintptr_t)_dyld_get_image_header(0);
+/* Index of the image in dyld's list, or -1. nullptr selects the main executable (MH_EXECUTE). */
+inline int32_t FindImageIndex(const char* ImageName = nullptr)
+{
+    const uint32_t Count = _dyld_image_count();
 
-    return GetImageBaseAndSize(SearchModuleName).Base;
+    if (!ImageName)
+    {
+        for (uint32_t i = 0; i < Count; i++)
+        {
+            const auto* Header = reinterpret_cast<const struct mach_header_64*>(_dyld_get_image_header(i));
+            if (Header && Header->magic == MH_MAGIC_64 && Header->filetype == MH_EXECUTE)
+                return static_cast<int32_t>(i);
+        }
+        return Count > 0 ? 0 : -1;
+    }
+
+    /* Exact file-name match first. A substring match on the full path would also match every framework inside "<Name>.app/". */
+    for (uint32_t i = 0; i < Count; i++)
+    {
+        if (strcmp(GetImageFileName(_dyld_get_image_name(i)), ImageName) == 0)
+            return static_cast<int32_t>(i);
+    }
+
+    for (uint32_t i = 0; i < Count; i++)
+    {
+        if (strstr(GetImageFileName(_dyld_get_image_name(i)), ImageName))
+            return static_cast<int32_t>(i);
+    }
+
+    return -1;
+}
+
+inline std::vector<MachSegment> GetImageSegments(const struct mach_header_64* Header, intptr_t Slide)
+{
+    std::vector<MachSegment> Segments;
+
+    if (!Header || Header->magic != MH_MAGIC_64)
+        return Segments;
+
+    auto* Cmd = reinterpret_cast<const struct load_command*>(Header + 1);
+
+    for (uint32_t c = 0; c < Header->ncmds; c++)
+    {
+        if (Cmd->cmdsize < sizeof(struct load_command))
+            break;
+
+        if (Cmd->cmd == LC_SEGMENT_64)
+        {
+            auto* Seg = reinterpret_cast<const struct segment_command_64*>(Cmd);
+
+            /* __PAGEZERO (and anything else without protection) is not mapped. Including it made the "image size" > 4GB. */
+            if (Seg->vmsize != 0 && Seg->initprot != VM_PROT_NONE)
+            {
+                MachSegment Segment{};
+                memcpy(Segment.Name, Seg->segname, 16);
+                Segment.Begin = static_cast<uintptr_t>(Seg->vmaddr + Slide);
+                Segment.End = Segment.Begin + static_cast<uintptr_t>(Seg->vmsize);
+                Segment.InitProt = Seg->initprot;
+                Segments.push_back(Segment);
+            }
+        }
+
+        Cmd = reinterpret_cast<const struct load_command*>(reinterpret_cast<uintptr_t>(Cmd) + Cmd->cmdsize);
+    }
+
+    return Segments;
+}
+
+inline std::vector<MachSegment> GetImageSegments(const char* ImageName = nullptr)
+{
+    const int32_t Index = FindImageIndex(ImageName);
+
+    if (Index < 0)
+        return {};
+
+    return GetImageSegments(reinterpret_cast<const struct mach_header_64*>(_dyld_get_image_header(Index)), _dyld_get_image_vmaddr_slide(Index));
+}
+
+inline MachImageInfo GetImageBaseAndSize(const char* ImageName = nullptr)
+{
+    const int32_t Index = FindImageIndex(ImageName);
+
+    if (Index < 0)
+        return { 0, 0, nullptr };
+
+    const auto* Header = reinterpret_cast<const struct mach_header_64*>(_dyld_get_image_header(Index));
+    const uintptr_t Base = reinterpret_cast<uintptr_t>(Header);
+
+    uintptr_t MaxAddr = Base;
+    for (const MachSegment& Segment : GetImageSegments(Header, _dyld_get_image_vmaddr_slide(Index)))
+    {
+        if (Segment.End > MaxAddr)
+            MaxAddr = Segment.End;
+    }
+
+    return { Base, static_cast<size_t>(MaxAddr - Base), Header };
+}
+
+inline uintptr_t GetModuleBase(const char* SearchModuleName = nullptr)
+{
+    const int32_t Index = FindImageIndex(SearchModuleName);
+
+    return Index < 0 ? 0x0 : reinterpret_cast<uintptr_t>(_dyld_get_image_header(Index));
 }
 
 inline std::pair<uintptr_t, size_t> GetSegmentByName(const struct mach_header_64* Header, const char* SegmentName)
@@ -295,27 +382,55 @@ inline bool IsInAnyModules(const uintptr_t Address) {
     return false;
 }
 
+/* Reads memory through the kernel, so an unmapped/protected address returns false instead of crashing the game. */
+inline bool ReadMemory(uintptr_t Address, void* Out, size_t Size)
+{
+    if (Size == 0)
+        return true;
+
+    if (!Out || Address < 0x1000 || Address > (UINTPTR_MAX - Size))
+        return false;
+
+    uint8_t* Destination = static_cast<uint8_t*>(Out);
+
+    for (size_t Done = 0; Done < Size;)
+    {
+        const size_t Amount = std::min<size_t>(Size - Done, 0x10000);
+
+        vm_size_t Read = 0;
+        const kern_return_t KR = vm_read_overwrite(mach_task_self(), static_cast<vm_address_t>(Address + Done), static_cast<vm_size_t>(Amount), reinterpret_cast<vm_address_t>(Destination + Done), &Read);
+
+        if (KR != KERN_SUCCESS || Read != Amount)
+            return false;
+
+        Done += Amount;
+    }
+
+    return true;
+}
+
 template <typename T>
 inline T SafeRead(uintptr_t Address, T Default = {})
 {
     T Buffer = Default;
-    vm_size_t Size = 0;
-    // Uses the same API as your IsBadReadPtr
-    kern_return_t KR = vm_read_overwrite(mach_task_self(), (vm_address_t)Address, sizeof(T), (vm_address_t)&Buffer, &Size);
-    if (KR != KERN_SUCCESS || Size != sizeof(T)) return Default;
+
+    if (!ReadMemory(Address, &Buffer, sizeof(T)))
+        return Default;
+
     return Buffer;
+}
+
+template <typename T>
+inline T SafeRead(const void* Address, T Default = {})
+{
+    return SafeRead<T>(reinterpret_cast<uintptr_t>(Address), Default);
 }
 
 inline bool IsBadReadPtr(const void* Ptr)
 {
+    /* Any failure (including KERN_INVALID_ARGUMENT for tiny/odd addresses) means we must not dereference it. */
     uint8_t Data = 0;
-    size_t Size = 0;
-    
-    kern_return_t KR = vm_read_overwrite(mach_task_self(), (vm_address_t)Ptr, 1, (vm_address_t)&Data, &Size);
-    return (KR == KERN_INVALID_ADDRESS ||
-            KR == KERN_MEMORY_FAILURE  ||
-            KR == KERN_MEMORY_ERROR    ||
-            KR == KERN_PROTECTION_FAILURE);
+    return !ReadMemory(reinterpret_cast<uintptr_t>(Ptr), &Data, 1);
 };
 
 inline bool IsBadReadPtr(const uintptr_t Ptr)
@@ -328,11 +443,25 @@ inline bool IsValidVirtualAddress(const uintptr_t Address)
     return !IsBadReadPtr(Address);
 }
 
+/* Userspace pointer that is 8-byte aligned (arm64 iOS). Cheap pre-check before any read. */
+inline bool IsPlausiblePointer(uintptr_t Ptr)
+{
+    return Ptr >= 0x1000 && Ptr < 0x0000800000000000ULL && (Ptr & 0x7) == 0;
+}
+
+inline bool IsPlausiblePointer(const void* Ptr)
+{
+    return IsPlausiblePointer(reinterpret_cast<uintptr_t>(Ptr));
+}
+
 inline bool IsInProcessRange(const uintptr_t Address)
 {
-    const auto [Base, Size, Header] = GetImageBaseAndSize();
-    if (Address >= Base && Address < (Base + Size))
+    /* Main image range doesn't change after launch, cache it (this is called in hot loops). */
+    static const MachImageInfo MainImage = GetImageBaseAndSize();
+
+    if (Address >= MainImage.Base && Address < (MainImage.Base + MainImage.Size))
         return true;
+
     return IsInAnyModules(Address);
 }
 
@@ -509,42 +638,67 @@ inline void* FindPattern(const char* Signature, const char* SegmentName = "__TEX
 }
 
 template<typename T>
-inline T* FindAlignedValueInProcessInRange(T Value, int32_t Alignment, uintptr_t StartAddress, uint32_t Range)
+inline T* FindAlignedValueInProcessInRange(T Value, int32_t Alignment, uintptr_t StartAddress, uintptr_t Range)
 {
-    for (uint32_t i = 0x0; i < Range; i += Alignment)
+    if (Alignment <= 0 || Range < sizeof(T))
+        return nullptr;
+
+    /* Copy the range in chunks through the kernel. Segments can contain unmapped holes (e.g. lazily bound pages). */
+    constexpr uintptr_t ChunkSize = 0x10000;
+    std::vector<uint8_t> Buffer(ChunkSize + sizeof(T));
+
+    for (uintptr_t ChunkStart = 0x0; ChunkStart + sizeof(T) <= Range; ChunkStart += ChunkSize)
     {
-        T* TypedPtr = reinterpret_cast<T*>(StartAddress + i);
-        if (*TypedPtr == Value)
-            return TypedPtr;
+        const uintptr_t ToRead = std::min<uintptr_t>(ChunkSize + sizeof(T), Range - ChunkStart);
+
+        if (!ReadMemory(StartAddress + ChunkStart, Buffer.data(), ToRead))
+            continue;
+
+        for (uintptr_t i = 0x0; i + sizeof(T) <= ToRead && i < ChunkSize; i += Alignment)
+        {
+            T Current;
+            memcpy(&Current, Buffer.data() + i, sizeof(T));
+
+            if (Current == Value)
+                return reinterpret_cast<T*>(StartAddress + ChunkStart + i);
+        }
     }
+
     return nullptr;
 }
 
 template<typename T>
 inline T* FindAlignedValueInProcess(T Value, const std::string& Sectionname = "__DATA", int32_t Alignment = alignof(T), bool bSearchAllSections = false)
 {
-    const auto [ImageBase, ImageSize, Header] = GetImageBaseAndSize();
-    uintptr_t SearchStart = ImageBase;
-    uintptr_t SearchRange = ImageSize;
+    const std::vector<MachSegment> Segments = GetImageSegments();
 
+    /* Named segment first */
     if (!bSearchAllSections)
     {
-        const auto [SectionStart, SectionSize] = GetSegmentByName(Header, Sectionname.c_str());
-        if (SectionStart != 0x0 && SectionSize != 0x0)
+        for (const MachSegment& Segment : Segments)
         {
-            SearchStart = SectionStart;
-            SearchRange = SectionSize;
-        }
-        else
-        {
-            bSearchAllSections = true;
+            if (strncmp(Segment.Name, Sectionname.c_str(), 16) != 0)
+                continue;
+
+            if (T* Result = FindAlignedValueInProcessInRange(Value, Alignment, Segment.Begin, Segment.End - Segment.Begin))
+                return Result;
         }
     }
 
-    T* Result = FindAlignedValueInProcessInRange(Value, Alignment, SearchStart, SearchRange);
-    if (!Result && SearchStart != ImageBase)
-        return FindAlignedValueInProcess(Value, Sectionname, Alignment, true);
-    return Result;
+    /* Then every other readable, non-executable segment of the image (never __PAGEZERO or unmapped memory) */
+    for (const MachSegment& Segment : Segments)
+    {
+        if (!(Segment.InitProt & VM_PROT_READ) || (Segment.InitProt & VM_PROT_EXECUTE) || strncmp(Segment.Name, "__LINKEDIT", 16) == 0)
+            continue;
+
+        if (!bSearchAllSections && strncmp(Segment.Name, Sectionname.c_str(), 16) == 0)
+            continue;
+
+        if (T* Result = FindAlignedValueInProcessInRange(Value, Alignment, Segment.Begin, Segment.End - Segment.Begin))
+            return Result;
+    }
+
+    return nullptr;
 }
 
 enum class InstType {
@@ -746,28 +900,48 @@ inline MemAddress FindByStringInAllSections(const CharType* RefStr, uintptr_t St
     if (StartAddress != 0x0 && (StartAddress < ImageBase || StartAddress > ImageEnd))
         return nullptr;
 
-    /* Start searching a bit ahead if StartAddress is provided to avoid immediate self-find */
-    uint32_t* SearchStart = StartAddress ? (reinterpret_cast<uint32_t*>(StartAddress) + 2) : reinterpret_cast<uint32_t*>(ImageBase);
-    int32_t SearchRange = StartAddress ? ImageEnd - StartAddress : ImageSize;
+    const size_t RefStrLen = static_cast<size_t>(StrlenHelper(RefStr));
+    const size_t RefStrBytes = RefStrLen * sizeof(CharType);
 
-    if (Range != 0x0)
-        SearchRange = fmin(Range, SearchRange);
+    std::vector<CharType> Candidate(RefStrLen + 1);
 
-    const int32_t RefStrLen = StrlenHelper(RefStr);
-
-    for (uintptr_t i = 0; i < SearchRange; i += 4)
+    /* Only code can contain ADRP+ADD, so only executable segments are scanned (the old code walked the whole image incl. unmapped space). */
+    for (const MachSegment& Segment : GetImageSegments())
     {
-        /* Check for ADRP+ADD (ADRL) sequence which loads a pointer relative to PC */
-        if (ASMUtils::IsADRL(reinterpret_cast<uintptr_t>(SearchStart) + i))
+        if (!(Segment.InitProt & VM_PROT_EXECUTE))
+            continue;
+
+        /* Start searching a bit ahead if StartAddress is provided to avoid immediate self-find */
+        uintptr_t SearchStart = Segment.Begin;
+        if (StartAddress != 0x0)
         {
-            const uintptr_t StrPtr = ASMUtils::ResolveADRL(reinterpret_cast<uintptr_t>(SearchStart) + i);
-            
-            if (!IsInProcessRange(StrPtr))
+            if (StartAddress + 8 >= Segment.End)
+                continue;
+
+            SearchStart = std::max<uintptr_t>(SearchStart, (StartAddress + 8) & ~uintptr_t(3));
+        }
+
+        uintptr_t SearchEnd = Segment.End - 8;
+        if (Range > 0 && SearchStart + static_cast<uintptr_t>(Range) < SearchEnd)
+            SearchEnd = SearchStart + static_cast<uintptr_t>(Range);
+
+        for (uintptr_t Address = SearchStart; Address < SearchEnd; Address += 4)
+        {
+            /* Check for ADRP+ADD (ADRL) sequence which loads a pointer relative to PC */
+            if (!ASMUtils::IsADRL(Address))
+                continue;
+
+            const uintptr_t StrPtr = ASMUtils::ResolveADRL(Address);
+
+            if (StrPtr < ImageBase || StrPtr + RefStrBytes > ImageEnd)
+                continue;
+
+            if (!ReadMemory(StrPtr, Candidate.data(), RefStrBytes))
                 continue;
 
             /* Check if the string at the resolved address matches our target */
-            if (StrnCmpHelper(RefStr, reinterpret_cast<const CharType*>(StrPtr), RefStrLen))
-                return { reinterpret_cast<uintptr_t>(SearchStart) + i };
+            if (StrnCmpHelper(RefStr, Candidate.data(), RefStrLen))
+                return { Address };
         }
     }
 
@@ -777,41 +951,60 @@ inline MemAddress FindByStringInAllSections(const CharType* RefStr, uintptr_t St
 template<typename Type = const char*>
 inline MemAddress FindUnrealExecFunctionByString(Type RefStr, void* StartAddress = nullptr)
 {
+    using CharType = std::remove_const_t<std::remove_pointer_t<Type>>;
+
     const auto [ImageBase, ImageSize, Header] = GetImageBaseAndSize();
-    uint8_t* SearchStart = StartAddress ? reinterpret_cast<uint8_t*>(StartAddress) : reinterpret_cast<uint8_t*>(ImageBase);
-    int32_t SearchRange = ImageSize;
+    const uintptr_t ImageEnd = ImageBase + ImageSize;
 
-    const int32_t RefStrLen = StrlenHelper(RefStr);
+    const size_t RefStrLen = static_cast<size_t>(StrlenHelper(RefStr));
+    std::vector<CharType> Candidate(RefStrLen + 1);
 
-    static auto IsValidExecFunctionNotSetupFunc = [](uintptr_t Address) -> bool
+    /* FNameNativePtrPair { const char* Name; FNativeFuncPtr Func; } tables live in data segments. Read them in chunks through the kernel. */
+    constexpr uintptr_t ChunkSize = 0x10000;
+    std::vector<uint8_t> Buffer(ChunkSize + sizeof(void*));
+
+    for (const MachSegment& Segment : GetImageSegments())
     {
-        if (!IsInProcessRange(Address)) return false;
-        return true;
-    };
+        if (!(Segment.InitProt & VM_PROT_READ) || (Segment.InitProt & VM_PROT_EXECUTE) || strncmp(Segment.Name, "__LINKEDIT", 16) == 0)
+            continue;
 
-    for (uintptr_t i = 0; i < (SearchRange - 0x8); i += sizeof(void*))
-    {
-        const uintptr_t PossibleStringAddress = *reinterpret_cast<uintptr_t*>(SearchStart + i);
-        const uintptr_t PossibleExecFuncAddress = *reinterpret_cast<uintptr_t*>(SearchStart + i + sizeof(void*));
-
-        if (PossibleStringAddress == PossibleExecFuncAddress) continue;
-        if (!IsInProcessRange(PossibleStringAddress) || !IsInProcessRange(PossibleExecFuncAddress)) continue;
-
-        if constexpr (std::is_same<Type, const char*>())
+        uintptr_t Begin = Segment.Begin;
+        if (StartAddress)
         {
-            if (strncmp(reinterpret_cast<const char*>(RefStr), reinterpret_cast<const char*>(PossibleStringAddress), RefStrLen) == 0 && IsValidExecFunctionNotSetupFunc(PossibleExecFuncAddress))
-            {
-                return { PossibleExecFuncAddress };
-            }
+            const uintptr_t Start = reinterpret_cast<uintptr_t>(StartAddress);
+            if (Start >= Segment.End)
+                continue;
+            Begin = std::max(Begin, Start & ~uintptr_t(7));
         }
-        else
+
+        for (uintptr_t Chunk = Begin; Chunk + 2 * sizeof(void*) <= Segment.End; Chunk += ChunkSize)
         {
-            if (wcsncmp(reinterpret_cast<const wchar_t*>(RefStr), reinterpret_cast<const wchar_t*>(PossibleStringAddress), RefStrLen) == 0 && IsValidExecFunctionNotSetupFunc(PossibleExecFuncAddress))
+            const uintptr_t ToRead = std::min<uintptr_t>(ChunkSize + sizeof(void*), Segment.End - Chunk);
+
+            if (!ReadMemory(Chunk, Buffer.data(), ToRead))
+                continue;
+
+            for (uintptr_t i = 0; i + 2 * sizeof(void*) <= ToRead && i < ChunkSize; i += sizeof(void*))
             {
-                return { PossibleExecFuncAddress };
+                uintptr_t PossibleStringAddress, PossibleExecFuncAddress;
+                memcpy(&PossibleStringAddress, Buffer.data() + i, sizeof(void*));
+                memcpy(&PossibleExecFuncAddress, Buffer.data() + i + sizeof(void*), sizeof(void*));
+
+                if (PossibleStringAddress == PossibleExecFuncAddress)
+                    continue;
+
+                if (PossibleStringAddress < ImageBase || PossibleStringAddress >= ImageEnd || PossibleExecFuncAddress < ImageBase || PossibleExecFuncAddress >= ImageEnd)
+                    continue;
+
+                if (!ReadMemory(PossibleStringAddress, Candidate.data(), RefStrLen * sizeof(CharType)))
+                    continue;
+
+                if (StrnCmpHelper<CharType>(RefStr, Candidate.data(), RefStrLen))
+                    return { PossibleExecFuncAddress };
             }
         }
     }
+
     return nullptr;
 }
 
