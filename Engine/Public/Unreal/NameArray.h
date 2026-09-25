@@ -16,7 +16,7 @@ private:
 	static inline UnrealString(*GetStr)(uint8* NameEntry) = nullptr;
 
 private:
-	uint8* Address;
+	uint8* Address = nullptr;
 
 public:
 	FNameEntry() = default;
@@ -42,6 +42,9 @@ private:
 
 	static inline int64 NameEntryStride = 0x0;
 
+	/* Delta Force obfuscates the characters of every FNameEntry */
+	static inline bool bIsNameEncrypted = false;
+
 	static inline void* (*ByIndex)(void* NamesArray, int32 ComparisonIndex, int32 NamePoolBlockOffsetBits) = nullptr;
 
 private:
@@ -59,6 +62,16 @@ public:
 	/* Initializes the GNames offset, but doesn't call NameArray::InitializeNameArray() or NameArray::InitializedNamePool() */
 	static bool SetGNamesWithoutCommiting();
 
+	/*
+	* FNamePool with a known (already validated) layout, e.g. Delta Force: Blocks[] @0xC8, CurrentByteCursor @0x100C8, CurrentBlock @0x100CC.
+	* Every read of the pool goes through the kernel, invalid indices return an empty name instead of crashing.
+	*/
+	static bool InitWithKnownNamePoolLayout(uint8* NamePool, int32 GNamesOffset, int32 BlocksOffset, int32 CursorOffset, int32 CurrentBlockOffset,
+		uint32 BlockOffsetBits, uint32 EntryStride, uint32 LengthShift, bool bEncryptedNames);
+
+	/* Thread-safe, cached name of a ComparisonIndex (names in the pool are immutable once allocated). */
+	static UnrealString GetCachedName(int32 ComparisonIndex);
+
 	static void PostInit();
 	
 public:
@@ -66,6 +79,8 @@ public:
 
 	static int32 GetNumElements();
 	static int32 GetByteCursor();
+
+	static inline bool IsNameEncrypted() { return bIsNameEncrypted; }
 
 	static FNameEntry GetNameEntry(const void* Name);
 	static FNameEntry GetNameEntry(int32 Idx);

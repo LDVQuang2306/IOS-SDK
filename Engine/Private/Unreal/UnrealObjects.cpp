@@ -1,10 +1,183 @@
 
 #include <format>
 #include <format.h>
+#include <mutex>
+#include <string_view>
 
 #include "../../Public/Unreal/UnrealObjects.h"
 #include "../../Public/Unreal/ObjectArray.h"
 #include "../../Public/OffsetFinder/Offsets.h"
+
+
+/*
+* Name based EClassCastFlags (Settings::Internal::bUseNameBasedCastFlags).
+*
+* Some games (Delta Force) don't have a verified UClass::CastFlags/FFieldClass::CastFlags offset. The cast flags of a class
+* are just the union of the flags of its engine base classes, so they can be rebuilt from the class hierarchy names.
+*/
+namespace
+{
+	struct FCastFlagInfo
+	{
+		EClassCastFlags OwnFlag;
+		const char* Parent;  // FField hierarchy, nullptr for roots
+		const char* Package; // Package of the UClass with this name
+	};
+
+	const std::unordered_map<std::string_view, FCastFlagInfo>& GetCastFlagTable()
+	{
+		using enum EClassCastFlags;
+
+		static const std::unordered_map<std::string_view, FCastFlagInfo> Table =
+		{
+			/* CoreUObject */
+			{ "Field", { Field, nullptr, "CoreUObject" } },
+			{ "Enum", { Enum, nullptr, "CoreUObject" } },
+			{ "Struct", { Struct, nullptr, "CoreUObject" } },
+			{ "ScriptStruct", { ScriptStruct, nullptr, "CoreUObject" } },
+			{ "Class", { Class, nullptr, "CoreUObject" } },
+			{ "Function", { Function, nullptr, "CoreUObject" } },
+			{ "DelegateFunction", { DelegateFunction, nullptr, "CoreUObject" } },
+			{ "SparseDelegateFunction", { SparseDelegateFunction, nullptr, "CoreUObject" } },
+			{ "Package", { Package, nullptr, "CoreUObject" } },
+
+			/* Properties (FField classes, or UClasses in CoreUObject before UE4.25) */
+			{ "Property", { Property, "Field", "CoreUObject" } },
+			{ "NumericProperty", { NumericProperty, "Property", "CoreUObject" } },
+			{ "ByteProperty", { ByteProperty, "NumericProperty", "CoreUObject" } },
+			{ "Int8Property", { Int8Property, "NumericProperty", "CoreUObject" } },
+			{ "Int16Property", { Int16Property, "NumericProperty", "CoreUObject" } },
+			{ "IntProperty", { IntProperty, "NumericProperty", "CoreUObject" } },
+			{ "Int64Property", { Int64Property, "NumericProperty", "CoreUObject" } },
+			{ "UInt16Property", { UInt16Property, "NumericProperty", "CoreUObject" } },
+			{ "UInt32Property", { UInt32Property, "NumericProperty", "CoreUObject" } },
+			{ "UInt64Property", { UInt64Property, "NumericProperty", "CoreUObject" } },
+			{ "FloatProperty", { FloatProperty, "NumericProperty", "CoreUObject" } },
+			{ "DoubleProperty", { DoubleProperty, "NumericProperty", "CoreUObject" } },
+			{ "LargeWorldCoordinatesRealProperty", { LargeWorldCoordinatesRealProperty, "DoubleProperty", "CoreUObject" } },
+			{ "BoolProperty", { BoolProperty, "Property", "CoreUObject" } },
+			{ "ObjectPropertyBase", { ObjectPropertyBase, "Property", "CoreUObject" } },
+			{ "ObjectProperty", { ObjectProperty, "ObjectPropertyBase", "CoreUObject" } },
+			{ "ObjectPtrProperty", { None, "ObjectProperty", "CoreUObject" } },
+			{ "ClassProperty", { ClassProperty, "ObjectProperty", "CoreUObject" } },
+			{ "ClassPtrProperty", { None, "ClassProperty", "CoreUObject" } },
+			{ "WeakObjectProperty", { WeakObjectProperty, "ObjectPropertyBase", "CoreUObject" } },
+			{ "LazyObjectProperty", { LazyObjectProperty, "ObjectPropertyBase", "CoreUObject" } },
+			{ "SoftObjectProperty", { SoftObjectProperty, "ObjectPropertyBase", "CoreUObject" } },
+			{ "SoftClassProperty", { SoftClassProperty, "SoftObjectProperty", "CoreUObject" } },
+			{ "InterfaceProperty", { InterfaceProperty, "Property", "CoreUObject" } },
+			{ "NameProperty", { NameProperty, "Property", "CoreUObject" } },
+			{ "StrProperty", { StrProperty, "Property", "CoreUObject" } },
+			{ "TextProperty", { TextProperty, "Property", "CoreUObject" } },
+			{ "StructProperty", { StructProperty, "Property", "CoreUObject" } },
+			{ "ArrayProperty", { ArrayProperty, "Property", "CoreUObject" } },
+			{ "MapProperty", { MapProperty, "Property", "CoreUObject" } },
+			{ "SetProperty", { SetProperty, "Property", "CoreUObject" } },
+			{ "EnumProperty", { EnumProperty, "Property", "CoreUObject" } },
+			{ "DelegateProperty", { DelegateProperty, "Property", "CoreUObject" } },
+			{ "MulticastDelegateProperty", { MulticastDelegateProperty, "Property", "CoreUObject" } },
+			{ "MulticastInlineDelegateProperty", { MulticastInlineDelegateProperty, "MulticastDelegateProperty", "CoreUObject" } },
+			{ "MulticastSparseDelegateProperty", { MulticastSparseDelegateProperty, "MulticastDelegateProperty", "CoreUObject" } },
+			{ "FieldPathProperty", { FieldPathProperty, "Property", "CoreUObject" } },
+			{ "OptionalProperty", { OptionalProperty, "Property", "CoreUObject" } },
+
+			/* Engine */
+			{ "Level", { Level, nullptr, "Engine" } },
+			{ "Actor", { Actor, nullptr, "Engine" } },
+			{ "PlayerController", { PlayerController, nullptr, "Engine" } },
+			{ "Pawn", { Pawn, nullptr, "Engine" } },
+			{ "SceneComponent", { SceneComponent, nullptr, "Engine" } },
+			{ "PrimitiveComponent", { PrimitiveComponent, nullptr, "Engine" } },
+			{ "SkinnedMeshComponent", { SkinnedMeshComponent, nullptr, "Engine" } },
+			{ "SkeletalMeshComponent", { SkeletalMeshComponent, nullptr, "Engine" } },
+			{ "StaticMeshComponent", { StaticMeshComponent, nullptr, "Engine" } },
+			{ "Blueprint", { Blueprint, nullptr, "Engine" } },
+		};
+
+		return Table;
+	}
+
+	std::mutex CastFlagsMutex;
+	std::unordered_map<const void*, EClassCastFlags> ClassCastFlagsCache;
+	std::unordered_map<const void*, EClassCastFlags> FieldClassCastFlagsCache;
+
+	EClassCastFlags GetCumulativeFieldCastFlags(std::string_view Name)
+	{
+		const auto& Table = GetCastFlagTable();
+
+		EClassCastFlags Flags = EClassCastFlags::None;
+
+		for (int Depth = 0; Depth < 16 && !Name.empty(); Depth++)
+		{
+			auto It = Table.find(Name);
+			if (It == Table.end())
+				break;
+
+			Flags |= It->second.OwnFlag;
+			Name = It->second.Parent ? It->second.Parent : "";
+		}
+
+		return Flags;
+	}
+
+	EClassCastFlags GetFieldClassCastFlagsByName(uint8* FieldClass)
+	{
+		if (!FieldClass)
+			return EClassCastFlags::None;
+
+		{
+			std::lock_guard<std::mutex> Lock(CastFlagsMutex);
+
+			auto It = FieldClassCastFlagsCache.find(FieldClass);
+			if (It != FieldClassCastFlagsCache.end())
+				return It->second;
+		}
+
+		const std::string Name = UEFFieldClass(FieldClass).GetName();
+
+		EClassCastFlags Flags = GetCumulativeFieldCastFlags(Name);
+
+		/* Unknown (game specific) property types are still properties */
+		if (Flags == EClassCastFlags::None && Name.size() > 8 && Name.ends_with("Property"))
+			Flags = EClassCastFlags::Field | EClassCastFlags::Property;
+
+		std::lock_guard<std::mutex> Lock(CastFlagsMutex);
+		return FieldClassCastFlagsCache.emplace(FieldClass, Flags).first->second;
+	}
+
+	EClassCastFlags GetClassCastFlagsByName(uint8* Class)
+	{
+		if (!Class)
+			return EClassCastFlags::None;
+
+		{
+			std::lock_guard<std::mutex> Lock(CastFlagsMutex);
+
+			auto It = ClassCastFlagsCache.find(Class);
+			if (It != ClassCastFlagsCache.end())
+				return It->second;
+		}
+
+		const auto& Table = GetCastFlagTable();
+
+		EClassCastFlags Flags = EClassCastFlags::None;
+
+		int Depth = 0;
+		for (UEStruct Current(Class); Current && Depth < 256; Current = Current.GetSuper(), Depth++)
+		{
+			auto It = Table.find(Current.GetName());
+			if (It == Table.end())
+				continue;
+
+			/* Only the engine's own class counts, not a game class that happens to have the same name */
+			if (Current.GetOutermost().GetName() == It->second.Package)
+				Flags |= It->second.OwnFlag;
+		}
+
+		std::lock_guard<std::mutex> Lock(CastFlagsMutex);
+		return ClassCastFlagsCache.emplace(Class, Flags).first->second;
+	}
+}
 
 
 void* UEFFieldClass::GetAddress()
@@ -24,6 +197,12 @@ EFieldClassID UEFFieldClass::GetId() const
 
 EClassCastFlags UEFFieldClass::GetCastFlags() const
 {
+	if (!Class)
+		return EClassCastFlags::None;
+
+	if (Settings::Internal::bUseNameBasedCastFlags)
+		return GetFieldClassCastFlagsByName(Class);
+
 	return *reinterpret_cast<EClassCastFlags*>(Class + Off::FFieldClass::CastFlags);
 }
 
@@ -200,11 +379,17 @@ void* UEObject::GetAddress()
 
 void* UEObject::GetVft() const
 {
+	if (!Object)
+		return nullptr;
+
 	return *reinterpret_cast<void**>(Object);
 }
 
 EObjectFlags UEObject::GetFlags() const
 {
+	if (Off::UObject::Flags < 0)
+		return EObjectFlags::NoFlags;
+
 	return *reinterpret_cast<EObjectFlags*>(Object + Off::UObject::Flags);
 }
 
@@ -235,6 +420,10 @@ int32 UEObject::GetPackageIndex() const
 
 bool UEObject::HasAnyFlags(EObjectFlags Flags) const
 {
+	/* UObject::Flags wasn't found, the only flag that is needed during generation can also be derived from the name */
+	if (Off::UObject::Flags < 0)
+		return (Flags & EObjectFlags::ClassDefaultObject) && GetName().starts_with("Default__");
+
 	return GetFlags() & Flags;
 }
 
@@ -647,6 +836,12 @@ bool UEStruct::HasMembers() const
 
 EClassCastFlags UEClass::GetCastFlags() const
 {
+	if (!Object)
+		return EClassCastFlags::None;
+
+	if (Settings::Internal::bUseNameBasedCastFlags)
+		return GetClassCastFlagsByName(Object);
+
 	return *reinterpret_cast<EClassCastFlags*>(Object + Off::UClass::CastFlags);
 }
 
@@ -662,11 +857,17 @@ bool UEClass::IsType(EClassCastFlags TypeFlag) const
 
 UEObject UEClass::GetDefaultObject() const
 {
+	if (!Object || Off::UClass::ClassDefaultObject < 0)
+		return nullptr;
+
 	return UEObject(*reinterpret_cast<void**>(Object + Off::UClass::ClassDefaultObject));
 }
 
 TArray<FImplementedInterface> UEClass::GetImplementedInterfaces() const
 {
+	if (!Object || Off::UClass::ImplementedInterfaces < 0)
+		return TArray<FImplementedInterface>();
+
 	return *reinterpret_cast<TArray<FImplementedInterface>*>(Object + Off::UClass::ImplementedInterfaces);
 }
 

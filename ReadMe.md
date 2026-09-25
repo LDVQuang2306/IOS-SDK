@@ -8,6 +8,7 @@
 * **Dynamic Offset Scanning**: Automatically finds `GObjects`, `GNames`, and `UWorld` without requiring hardcoded offsets for most games.
 * **Broad Compatibility**: Tested on Unreal Engine versions **4.17** to **4.26** (e.g., ARK 2.0, Ark Revamp, Special Forces 3).
 * **Floating UI**: Uses a draggable floating button to toggle the menu, avoiding conflict with game gestures.
+* **Delta Force support**: `DeltaForceClient` is detected automatically and dumped with a dedicated, validated engine profile (see below).
 
 ## Usage
 
@@ -37,11 +38,51 @@ Use any signer (Sideloadly, ESign, GBox or whatever Signer that supports dylib i
 The generated files will be saved to your device's Documents directory (Make Sure to enable "Supports Document Browser" before signing):
 `/Documents/[GameVersion-GameName]/`
 
+A full log of every run is written to `/Documents/Dumper-7.log` ("Copy to Clipboard" in the menu copies the console to the iOS pasteboard).
+
+---
+
+## Delta Force (`DeltaForceClient`)
+
+Delta Force ships a modified UE4 core, which is why the generic Dumper-7 path could not dump it (and crashed while trying):
+
+| | Generic UE4 | Delta Force |
+|---|---|---|
+| FNameEntry strings | plain | XOR obfuscated (per-length key) |
+| FNamePool | `CurrentBlock`, `Cursor`, `Blocks[]` | `Blocks[]` @0xC8, `Cursor` @0x100C8, `CurrentBlock` @0x100CC, 18 block bits |
+| UObject | Flags 0x8, Index 0xC, Class 0x10, Name 0x18, Outer 0x20 | Class 0x8, Outer 0x10, Flags 0x18, Name 0x1C, Index 0x24 |
+| UStruct | Super 0x40, Children 0x48, ChildProperties 0x50, Size 0x58 | Size 0x3C, Super 0x40, MinAlignment 0x48, Children 0x50, ChildProperties 0x68 |
+| FField / FProperty | Class 0x8, Next 0x20, Name 0x28 / ArrayDim 0x30 ... | Next 0x18, Class 0x20, Name 0x28 / ArrayDim 0x38, ElementSize 0x3C, Flags 0x40, Offset 0x4C |
+| GUObjectArray | Objects 0x0, NumElements 0x14 | ObjObjects @0x10: NumElements 0x14, NumChunks 0x18, Objects 0x20 |
+
+The layout comes from the validated reference dumper (`DFSDKDumper`). When the game is detected (`Engine/Private/Unreal/DeltaForce.cpp`):
+
+1. **GNames/GObjects are discovered, not hard-coded**: the data segments are scanned, every candidate must decode `FName[0] == "None"` and hold the `CoreUObject` anchors at their `InternalIndex`. The name codec and the UObject header/FUObjectItem layout are inferred and must be unique, otherwise the dump is refused instead of guessing.
+2. **Every read before verification goes through the kernel** (`vm_read_overwrite`), so a wrong candidate can't crash the game.
+3. The deeper layout (UStruct, UFunction, UEnum, FField, FProperty) is **verified on live data** (`Class->Struct->Field->Object`, `FGuid{A,B,C,D}`, `AActor` functions, `ENetRole`) before the generator dereferences anything. If a game update changed it, the dump stops with an error in the console.
+4. FProperty payload offsets (Struct/PropertyClass/Inner/Enum/Key/Value/...) and the bool layout are re-checked against real properties.
+5. Cast flags are resolved from class names (no unverified `UClass::CastFlags` offset). Nothing calls game code (no ProcessEvent during the dump).
+6. The SDK contains the name decryption (`DeltaForceNames::DecryptAnsi/DecryptWide`) and the Delta Force FNamePool layout, so `FName::ToString()` works in the generated SDK.
+
+Usage: open the game, **wait until the lobby is fully loaded**, then press *Start Dump*. If it reports that GNames/GObjects were not found, wait a bit longer and press it again (nothing is written before the engine core validated).
+
+Optional manual override (validated before use) in `Settings.h`:
+
+```cpp
+namespace Settings::DeltaForce
+{
+    inline uint64_t GNamesRVA = 0x18445040;   // 0 = scan
+    inline uint64_t GObjectsRVA = 0x18881AB8; // 0 = scan
+}
+```
+
 ---
 
 ## Configuration & Overrides
 
-If the dumper fails to find offsets automatically (common in games with encryption or obfuscation), you can manually configure overrides in **`Dumper/Generator/Private/Generators/Generator.cpp`** inside the `Generator::InitEngineCore()` function.
+If the dumper fails to find offsets automatically (common in games with encryption or obfuscation), you can manually configure overrides in **`Generator/Private/Generators/Generator.cpp`** inside the `Generator::InitEngineCore()` function.
+
+`Settings.h` → `UEVERSION` (default `426`) selects the string type: `>= 421` uses UTF-16 `char16_t` (every FNamePool/FProperty game incl. Delta Force), below that `wchar_t` for old UE4.17-4.20 iOS builds.
 
 ### 1. GObjects (Global Object Array)
 
@@ -90,6 +131,7 @@ ObjectArray::InitDecryption([](void* ObjPtr) -> uint8* {
 
 ### 4. ProcessEvent
 
+`ProcessEvent` is located with an ARM64 heuristic (loads `UFunction::FunctionFlags` and tests `FUNC_Native`/`FUNC_HasOutParms`). The value is only written to the SDK, the dumper never calls it.
 If the virtual table index for `ProcessEvent` is incorrect:
 
 ```cpp
@@ -105,14 +147,13 @@ Off::InSDK::ProcessEvent::InitPE(69);
 * **Encryqed**: Original creator of [Dumper-7](https://github.com/Encryqed/Dumper-7).
 * **Aethereux**: Ported and adapted for iOS/ARM64 [upload ios dumper] (https://github.com/Aethereux/iOS-Dumper-7).
 * **LDVQuang2306**: Convert xcode to theos
+* **DFSDKDumper**: Delta Force layout, name codec and discovery/validation logic (ported into `Engine/Private/Unreal/DeltaForce*.cpp`)
 
 
 * Contributions are Highly Appreciated for more improvements!
 
 ## TODO
 
-- Find ProcessEvent Offset in the Memory (Not Manual Overwrites)
 - Find NamesArray (For UE below 4.22) in Memory
 - Fix Fallback Methods in Finding FNames (AppendString at UnrealTypes.cpp)
-- Tool have something error
 

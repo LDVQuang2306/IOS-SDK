@@ -1,5 +1,5 @@
 #pragma once
-#include <vector>
+#include <deque>
 #include <string>
 #include <mutex>
 #include "../ImGui/imgui.h"
@@ -15,7 +15,10 @@ class Console {
 public:
     static Console& Get(); // Singleton accessor
 
-    std::vector<Output> outputArr;
+    /* Oldest lines are dropped after this many, a full dump logs a lot and rendering every line each frame freezes the game */
+    static constexpr size_t MaxLines = 5000;
+
+    std::deque<Output> outputArr;
     std::mutex logMutex;
     bool autoScroll = true;
     bool visible = true;
@@ -24,6 +27,11 @@ public:
     void logError(const std::string& text);
     void logInfo(const std::string& text); // Using for Success/Highlight
     void clearLogs();
+
+    std::string GetAllText(); // Every stored line, for "Copy to Clipboard"
     
     void Render(); // Call this in your ImGui loop
+
+private:
+    void push(const std::string& text, int type);
 };

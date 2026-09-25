@@ -1,3 +1,4 @@
+#include <array>
 #include <format>
 
 #include "../../../Utils/Utils.h"
@@ -9,47 +10,102 @@
 #include "../../Public/Unreal/NameArray.h"
 #include "../../../Menu/Logger.h"
 
-// @@TODO: Fix this shit for now init it manually
+/*
+* ARM64 heuristic: UObject::ProcessEvent loads UFunction::FunctionFlags early and tests FUNC_Native (bit 10) and later FUNC_HasOutParms (bit 22)
+* with TBZ/TBNZ. (The original x86 'test [reg+FunctionFlags], imm32' pattern can never match ARM64 code.)
+*/
 void Off::InSDK::ProcessEvent::InitPE()
 {
-	void** Vft = *(void***)ObjectArray::GetByIndex(0).GetAddress();
+	Off::InSDK::ProcessEvent::PEIndex = 0x0;
+	Off::InSDK::ProcessEvent::PEOffset = 0x0;
 
-	/* Primary, and more reliable, check for ProcessEvent */
-	auto IsProcessEvent = [](const uint8_t* FuncAddress, [[maybe_unused]] int32_t Index) -> bool
+	UEObject FirstObject = ObjectArray::GetByIndex(0);
+
+	if (!FirstObject || Off::UFunction::FunctionFlags <= 0)
 	{
-		return FindPatternInRange({ 0xF7, -0x1, Off::UFunction::FunctionFlags, 0x0, 0x0, 0x0, 0x0, 0x04, 0x0, 0x0 }, FuncAddress, 0x400)
-			&& FindPatternInRange({ 0xF7, -0x1, Off::UFunction::FunctionFlags, 0x0, 0x0, 0x0, 0x0, 0x0, 0x40, 0x0 }, FuncAddress, 0xF00);
-	};
-
-	const void* ProcessEventAddr = nullptr;
-	int32_t ProcessEventIdx = 0;
-
-	auto [FuncPtr, FuncIdx] = IterateVTableFunctions(Vft, IsProcessEvent);
-
-	ProcessEventAddr = FuncPtr;
-	ProcessEventIdx = FuncIdx;
-
-	if (!FuncPtr)
-	{
-		/* ProcessEvent is sometimes located right after a func with the string L"Accessed None. Might as well check for it, because else we're going to crash anyways. */
-		void* PossiblePEAddr = (void*)FindByWStringInAllSections(TEXT("Accessed None")).FindNextFunctionStart();
-
-		auto IsSameAddr = [PossiblePEAddr](const uint8_t* FuncAddress, [[maybe_unused]] int32_t Index) -> bool
-		{
-			return FuncAddress == PossiblePEAddr;
-		};
-
-		auto [FuncPtr2, FuncIdx2] = IterateVTableFunctions(Vft, IsSameAddr);
-		ProcessEventAddr = FuncPtr2;
-		ProcessEventIdx = FuncIdx2;
+		LogError("Couldn't find ProcessEvent! (no object/FunctionFlags)");
+		return;
 	}
 
-	if (ProcessEventAddr)
-	{
-		Off::InSDK::ProcessEvent::PEIndex = ProcessEventIdx;
-		Off::InSDK::ProcessEvent::PEOffset = GetOffset(ProcessEventAddr);
+	void** Vft = static_cast<void**>(FirstObject.GetVft());
 
-		LogSuccess("ProcessEvent found - Offset: 0x%X, Index: 0x%X", Off::InSDK::ProcessEvent::PEOffset, ProcessEventIdx);
+	if (!IsPlausiblePointer(Vft) || IsBadReadPtr(Vft))
+	{
+		LogError("Couldn't find ProcessEvent! (invalid VTable)");
+		return;
+	}
+
+	const uint32 FunctionFlagsOffset = static_cast<uint32>(Off::UFunction::FunctionFlags);
+
+	/* Returns the byte offset of the FunctionFlags load inside the function, or -1 if the function doesn't look like ProcessEvent */
+	auto GetProcessEventScore = [FunctionFlagsOffset](uintptr_t FuncAddress) -> int32
+	{
+		constexpr int32 NumEarlyInstructions = 0x400 / 4;
+		constexpr int32 NumInstructions = 0xF00 / 4;
+
+		std::array<uint32, NumInstructions> Code{};
+		if (!ReadMemory(FuncAddress, Code.data(), sizeof(Code)))
+			return -1;
+
+		int32 LoadOffset = -1;
+		bool bTestsNative = false;
+		bool bTestsHasOutParms = false;
+
+		for (int32 i = 0; i < NumInstructions; i++)
+		{
+			const uint32 Instruction = Code[i];
+
+			/* LDR Wt, [Xn, #imm] (32-bit, unsigned offset scaled by 4) */
+			if (LoadOffset < 0 && i < NumEarlyInstructions && (Instruction & 0xFFC00000) == 0xB9400000 && ((Instruction >> 10) & 0xFFF) * 4 == FunctionFlagsOffset)
+				LoadOffset = i * 4;
+
+			/* TBZ/TBNZ Rt, #bit, label (after the load) */
+			if (LoadOffset >= 0 && (Instruction & 0x7E000000) == 0x36000000)
+			{
+				const uint32 Bit = ((Instruction >> 31) << 5) | ((Instruction >> 19) & 0x1F);
+
+				if (Bit == 10 && i < NumEarlyInstructions + LoadOffset / 4)
+					bTestsNative = true;
+
+				if (Bit == 22)
+					bTestsHasOutParms = true;
+			}
+		}
+
+		return (LoadOffset >= 0 && bTestsNative && bTestsHasOutParms) ? LoadOffset : -1;
+	};
+
+	/*
+	* The scan window runs past short functions into whatever code follows them, so a virtual function placed right before ProcessEvent
+	* matches too. The real one loads FunctionFlags closest to its own start.
+	*/
+	int32 BestIndex = -1;
+	int32 BestScore = INT32_MAX;
+	uintptr_t BestAddress = 0x0;
+
+	for (int32 i = 0; i < 0x200; i++)
+	{
+		const uintptr_t FuncAddress = SafeRead<uintptr_t>(reinterpret_cast<uintptr_t>(Vft + i));
+
+		if (!FuncAddress || !IsInProcessRange(FuncAddress))
+			break;
+
+		const int32 Score = GetProcessEventScore(FuncAddress);
+
+		if (Score >= 0 && Score < BestScore && i >= 0x10)
+		{
+			BestIndex = i;
+			BestScore = Score;
+			BestAddress = FuncAddress;
+		}
+	}
+
+	if (BestIndex >= 0)
+	{
+		Off::InSDK::ProcessEvent::PEIndex = BestIndex;
+		Off::InSDK::ProcessEvent::PEOffset = GetOffset(BestAddress);
+
+		LogSuccess("ProcessEvent found - Offset: 0x%X, Index: 0x%X", Off::InSDK::ProcessEvent::PEOffset, BestIndex);
 		return;
 	}
 
@@ -60,13 +116,20 @@ void Off::InSDK::ProcessEvent::InitPE(int32 Index, const char* const ModuleName)
 {
 	Off::InSDK::ProcessEvent::PEIndex = Index;
 
-	void** VFT = *reinterpret_cast<void***>(ObjectArray::GetByIndex(0).GetAddress());
+	UEObject FirstObject = ObjectArray::GetByIndex(0);
+	void** VFT = FirstObject ? static_cast<void**>(FirstObject.GetVft()) : nullptr;
+
+	if (!IsPlausiblePointer(VFT) || Index < 0)
+	{
+		LogError("Manual ProcessEvent Override - invalid VTable/Index");
+		return;
+	}
 
 	uintptr_t Imagebase = GetModuleBase(ModuleName);
 
-	Off::InSDK::ProcessEvent::PEOffset = uintptr_t(VFT[Off::InSDK::ProcessEvent::PEIndex]) - Imagebase;
+	Off::InSDK::ProcessEvent::PEOffset = SafeRead<uintptr_t>(reinterpret_cast<uintptr_t>(VFT + Index)) - Imagebase;
 
-	LogInfo("Manual ProcessEvent Override - VFT-Offset: 0x%X", uintptr_t(VFT) - Imagebase);
+	LogInfo("Manual ProcessEvent Override - Index: 0x%X, VFT-Offset: 0x%X", Index, uintptr_t(VFT) - Imagebase);
 }
 
 /* UWorld */

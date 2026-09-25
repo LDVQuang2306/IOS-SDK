@@ -2,9 +2,12 @@
 #include <string>
 #include <vector>
 #include <cstdio> 
+#include <mutex>
+#include <unordered_map>
 
 #include "../../Public/Unreal/ObjectArray.h"
 #include "../../Public/Unreal/NameArray.h"
+#include "../../Public/Unreal/DeltaForce.h"
 #include "../../../Utils/Utils.h"
 #include "../../../Utils/Encoding/UtfN.hpp"
 #include "../../../Menu/Logger.h"
@@ -18,7 +21,7 @@ FNameEntry::FNameEntry(void* Ptr)
 
 UnrealString FNameEntry::GetWString()
 {
-    if (!Address)
+    if (!Address || !GetStr)
         return TEXT("");
 
     return GetStr(Address);
@@ -29,7 +32,8 @@ std::string FNameEntry::GetString()
     if (!Address)
         return "";
 
-    return std::string(GetWString().begin(), GetWString().end());
+    /* Was 'std::string(GetWString().begin(), GetWString().end())': two different temporaries (UB) and a lossy char16->char cast */
+    return UtfN::WStringToString(GetWString());
 }
 
 void* FNameEntry::GetAddress()
@@ -734,27 +738,181 @@ void NameArray::PostInit()
     }
 }
 
+namespace
+{
+    std::mutex NameCacheMutex;
+    std::unordered_map<int32, UnrealString> NameCache;
+}
+
+bool NameArray::InitWithKnownNamePoolLayout(uint8* NamePool, int32 GNamesOffset, int32 BlocksOffset, int32 CursorOffset, int32 CurrentBlockOffset,
+    uint32 BlockOffsetBits, uint32 EntryStride, uint32 LengthShift, bool bEncryptedNames)
+{
+    if (!NamePool || BlockOffsetBits < 12 || BlockOffsetBits > 20 || EntryStride == 0 || LengthShift == 0 || LengthShift > 12)
+    {
+        LogError("NameArray: invalid FNamePool layout");
+        return false;
+    }
+
+    GNames = NamePool;
+    Settings::Internal::bUseNamePool = true;
+    bIsNameEncrypted = bEncryptedNames;
+
+    Off::InSDK::NameArray::GNames = GNamesOffset;
+    Off::InSDK::NameArray::FNamePoolBlockOffsetBits = static_cast<int32>(BlockOffsetBits);
+    Off::InSDK::NameArray::FNameEntryStride = static_cast<int32>(EntryStride);
+
+    Off::NameArray::ChunksStart = BlocksOffset;
+    Off::NameArray::ByteCursor = CursorOffset;
+    Off::NameArray::MaxChunkIndex = CurrentBlockOffset;
+    Off::NameArray::NumElements = 0x0;
+
+    Off::FNameEntry::NamePool::HeaderOffset = 0x0;
+    Off::FNameEntry::NamePool::StringOffset = sizeof(uint16);
+
+    FNameBlockOffsetBits = BlockOffsetBits;
+    NameEntryStride = EntryStride;
+    FNameEntry::FNameEntryLengthShiftCount = static_cast<int32>(LengthShift);
+
+    ByIndex = [](void* NamesArray, int32 ComparisonIndex, int32 BlockBits) -> void*
+    {
+        if (!NamesArray || ComparisonIndex < 0)
+            return nullptr;
+
+        const uintptr Pool = reinterpret_cast<uintptr>(NamesArray);
+        const uint32 Block = static_cast<uint32>(ComparisonIndex) >> BlockBits;
+        const uint32 Offset = (static_cast<uint32>(ComparisonIndex) & ((1u << BlockBits) - 1)) * static_cast<uint32>(NameEntryStride);
+
+        const uint32 CurrentBlock = SafeRead<uint32>(Pool + Off::NameArray::MaxChunkIndex, 0xFFFFFFFF);
+        if (CurrentBlock >= 0x2000 || Block > CurrentBlock)
+            return nullptr;
+
+        const uint32 BlockSize = static_cast<uint32>(NameEntryStride) << BlockBits;
+        const uint32 Limit = Block == CurrentBlock ? SafeRead<uint32>(Pool + Off::NameArray::ByteCursor) : BlockSize;
+        if (Limit > BlockSize || Offset + sizeof(uint16) > Limit)
+            return nullptr;
+
+        const uintptr BlockPtr = SafeRead<uintptr>(Pool + Off::NameArray::ChunksStart + static_cast<uintptr>(Block) * sizeof(void*));
+        if (!IsPlausiblePointer(BlockPtr))
+            return nullptr;
+
+        return reinterpret_cast<void*>(BlockPtr + Offset);
+    };
+
+    FNameEntry::GetStr = [](uint8* NameEntry) -> UnrealString
+    {
+        uint16 Header = 0x0;
+        if (!ReadMemory(reinterpret_cast<uintptr>(NameEntry), &Header, sizeof(Header)))
+            return TEXT("");
+
+        const uint32 NameLen = Header >> FNameEntry::FNameEntryLengthShiftCount;
+        if (NameLen == 0 || NameLen > 1023)
+            return TEXT("");
+
+        const uintptr StringAddress = reinterpret_cast<uintptr>(NameEntry) + Off::FNameEntry::NamePool::StringOffset;
+
+        UnrealString Output;
+        Output.reserve(NameLen);
+
+        if (Header & FNameEntry::NameWideMask)
+        {
+            std::vector<uint16> Text(NameLen);
+            if (!ReadMemory(StringAddress, Text.data(), NameLen * sizeof(uint16)))
+                return TEXT("");
+
+            if (NameArray::bIsNameEncrypted)
+                DeltaForce::DecryptWide(Text.data(), Text.size());
+
+            for (const uint16 C : Text)
+                Output.push_back(static_cast<TCHAR>(C));
+
+            return Output;
+        }
+
+        std::vector<uint8> Text(NameLen);
+        if (!ReadMemory(StringAddress, Text.data(), NameLen))
+            return TEXT("");
+
+        if (NameArray::bIsNameEncrypted)
+            DeltaForce::DecryptAnsi(Text.data(), Text.size());
+
+        /* ANSI FNameEntries are Latin-1, widen byte by byte (not UTF-8) */
+        for (const uint8 C : Text)
+            Output.push_back(static_cast<TCHAR>(C));
+
+        return Output;
+    };
+
+    {
+        std::lock_guard<std::mutex> Lock(NameCacheMutex);
+        NameCache.clear();
+    }
+
+    const std::string FirstName = GetNameEntry(0).GetString();
+    if (FirstName != "None")
+    {
+        LogError("NameArray: FName[0] decoded to '%s' instead of 'None'", FirstName.c_str());
+        GNames = nullptr;
+        return false;
+    }
+
+    LogSuccess("NameArray: FNamePool initialized (Blocks 0x%X, Cursor 0x%X, CurrentBlock 0x%X, BlockBits %u, Stride %u, LenShift %u, Encrypted %d)",
+        BlocksOffset, CursorOffset, CurrentBlockOffset, BlockOffsetBits, EntryStride, LengthShift, bEncryptedNames);
+
+    return true;
+}
+
+UnrealString NameArray::GetCachedName(int32 ComparisonIndex)
+{
+    {
+        std::lock_guard<std::mutex> Lock(NameCacheMutex);
+
+        auto It = NameCache.find(ComparisonIndex);
+        if (It != NameCache.end())
+            return It->second;
+    }
+
+    UnrealString Name = GetNameEntry(ComparisonIndex).GetWString();
+
+    std::lock_guard<std::mutex> Lock(NameCacheMutex);
+    return NameCache.emplace(ComparisonIndex, std::move(Name)).first->second;
+}
+
 int32 NameArray::GetNumChunks()
 {
-    return *reinterpret_cast<int32*>(GNames + Off::NameArray::MaxChunkIndex);
+    if (!GNames)
+        return 0;
+
+    return SafeRead<int32>(GNames + Off::NameArray::MaxChunkIndex);
 }
 
 int32 NameArray::GetNumElements()
 {
-    return !Settings::Internal::bUseNamePool ? *reinterpret_cast<int32*>(GNames + Off::NameArray::NumElements) : 0;
+    if (!GNames)
+        return 0;
+
+    return !Settings::Internal::bUseNamePool ? SafeRead<int32>(GNames + Off::NameArray::NumElements) : 0;
 }
 
 int32 NameArray::GetByteCursor()
 {
-    return Settings::Internal::bUseNamePool ? *reinterpret_cast<int32*>(GNames + Off::NameArray::ByteCursor) : 0;
+    if (!GNames)
+        return 0;
+
+    return Settings::Internal::bUseNamePool ? SafeRead<int32>(GNames + Off::NameArray::ByteCursor) : 0;
 }
 
 FNameEntry NameArray::GetNameEntry(const void* Name)
 {
+    if (!ByIndex || !GNames || !Name)
+        return nullptr;
+
     return ByIndex(GNames, FName(Name).GetCompIdx(), FNameBlockOffsetBits);
 }
 
 FNameEntry NameArray::GetNameEntry(int32 Idx)
 {
+    if (!ByIndex || !GNames)
+        return nullptr;
+
     return ByIndex(GNames, Idx, FNameBlockOffsetBits);
 }

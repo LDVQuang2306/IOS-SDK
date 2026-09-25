@@ -42,12 +42,12 @@ constexpr inline std::array FChunkedFixedUObjectArrayLayouts =
 		.MaxChunksOffset = 0x08,
 		.NumChunksOffset = 0x0C,
 	},
-	FChunkedFixedUObjectArrayLayout // DeltaForce
+	FChunkedFixedUObjectArrayLayout // DeltaForce (only used if the Delta Force profile is bypassed)
 	{
 		.ObjectsOffset = 0x20,
 		.MaxElementsOffset = 0x10,
 		.NumElementsOffset = 0x14,
-		.MaxChunksOffset = 0x0,
+		.MaxChunksOffset = 0x1C,
 		.NumChunksOffset = 0x18,
 	},
 	FChunkedFixedUObjectArrayLayout // Mutliversus
@@ -85,14 +85,16 @@ bool IsAddressValidGObjects(const uintptr Address, const FFixedUObjectArrayLayou
 	if (NumElements < 0x1000)
 		return false;
 
-	if (IsBadReadPtr(ObjectsButDecrypted))
+	if (!IsPlausiblePointer(ObjectsButDecrypted))
         return false;
 
-	if (IsBadReadPtr(ObjectsButDecrypted[5].Object))
+	/* Candidates are arbitrary data, read through the kernel */
+	const uintptr FithObject = SafeRead<uintptr>(reinterpret_cast<uintptr>(&ObjectsButDecrypted[0x5].Object));
+
+	if (!IsPlausiblePointer(FithObject))
         return false;
 
-	const uintptr FithObject = reinterpret_cast<uintptr>(ObjectsButDecrypted[0x5].Object);
-	const int32 IndexOfFithobject = *reinterpret_cast<int32*>(FithObject + 0xC);
+	const int32 IndexOfFithobject = SafeRead<int32>(FithObject + 0xC, -1);
 
 	if (IndexOfFithobject != 0x5)
 		return false;
@@ -134,19 +136,49 @@ bool IsAddressValidGObjects(const uintptr Address, const FChunkedFixedUObjectArr
 	
 
 	/* The chunk-pointer must always be valid (especially because it's already decrypted [if it was encrypted at all]) */
-	if (!ObjectsPtrButDecrypted || IsBadReadPtr(ObjectsPtrButDecrypted))
+	if (!IsPlausiblePointer(ObjectsPtrButDecrypted) || IsBadReadPtr(ObjectsPtrButDecrypted))
 		return false;
 	
 
 	/* Check if every chunk-pointer is valid. */
 	for (int i = 0; i < NumChunks; i++)
 	{
-		if (!ObjectsPtrButDecrypted[i] || IsBadReadPtr(ObjectsPtrButDecrypted[i]))
+		void* Chunk = SafeRead<void*>(reinterpret_cast<uintptr>(ObjectsPtrButDecrypted + i));
+
+		if (!IsPlausiblePointer(Chunk) || IsBadReadPtr(Chunk))
 			return false;
 	}
 	
 	LogInfo("FChunkedFixedUObjectArray validation successful");
 	return true;
+}
+
+static void* ChunkedByIndexImpl(void* ObjectsArray, int32 Index, uint32 FUObjectItemSize, uint32 FUObjectItemOffset, uint32 PerChunk, uint8_t* (*DecryptPtr)(void*), uint8* GObjects)
+{
+	if (Index < 0 || PerChunk == 0)
+		return nullptr;
+
+	const int32 ChunkIndex = Index / PerChunk;
+	const int32 InChunkIdx = Index % PerChunk;
+
+	/* Never index past the committed chunk table */
+	if (Off::FUObjectArray::ChunkedFixedLayout.NumChunksOffset >= 0)
+	{
+		const int32 NumChunks = *reinterpret_cast<int32*>(GObjects + Off::FUObjectArray::ChunkedFixedLayout.NumChunksOffset);
+
+		if (ChunkIndex >= NumChunks)
+			return nullptr;
+	}
+
+	uint8** Chunks = reinterpret_cast<uint8**>(DecryptPtr(*reinterpret_cast<uint8**>(ObjectsArray)));
+	if (!Chunks)
+		return nullptr;
+
+	uint8* Chunk = Chunks[ChunkIndex];
+	if (!Chunk)
+		return nullptr;
+
+	return *reinterpret_cast<void**>(Chunk + (InChunkIdx * FUObjectItemSize) + FUObjectItemOffset);
 }
 
 void ObjectArray::InitializeFUObjectItem(uint8* FirstItemPtr)
@@ -227,35 +259,17 @@ void ObjectArray::InitializeChunkSize(uint8* ChunksPtr)
 /* We don't speak about this function... */
 void ObjectArray::Init(bool bScanAllMemory, const char* const ModuleName)
 {
-    if (!bScanAllMemory)
-        LogInfo("\nDumper-7 by me, you & him\n\n\n");
+    LogInfo("\nDumper-7 by me, you & him\n\n\n");
 
     const auto [ImageBase, ImageSize, Header] = GetImageBaseAndSize(ModuleName);
 
-    uintptr SearchBase = ImageBase;
-    uintptr SearchRange = ImageSize;
-
-    if (!bScanAllMemory)
+    if (!ImageBase)
     {
-        const auto [DataSection, DataSize] = GetSegmentByName(Header, "__TEXT");
-
-        if (DataSection != 0x0 && DataSize != 0x0)
-        {
-            SearchBase = DataSection;
-            SearchRange = DataSize;
-        }
-        else
-        {
-            LogInfo("__text section not found, scanning all memory");
-            bScanAllMemory = true;
-        }
+        LogError("ObjectArray: module '%s' not found", ModuleName ? ModuleName : "<main executable>");
+        return;
     }
 
-    /* Sub 0x50 so we don't try to read out of bounds memory when checking FixedArray->IsValid() or ChunkedArray->IsValid() */
-    SearchRange -= 0x50;
-
-    if (!bScanAllMemory)
-        LogInfo("Searching for GObjects...\n\n");
+    LogInfo("Searching for GObjects...\n\n");
 
     auto MatchesAnyLayout = []<typename ArrayLayoutType, size_t Size>(const std::array<ArrayLayoutType, Size>& ObjectArrayLayouts, uintptr Address)
     {
@@ -281,85 +295,77 @@ void ObjectArray::Init(bool bScanAllMemory, const char* const ModuleName)
         return false;
     };
 
-    for (int i = 0; i < SearchRange; i += 0x4)
+    /* GObjects is a global variable: only data segments can contain it. (The old code scanned __TEXT, then the whole "image" incl. unmapped memory.) */
+    for (const MachSegment& Segment : GetImageSegments(ModuleName))
     {
-        const uintptr CurrentAddress = SearchBase + i;
+        if (!(Segment.InitProt & VM_PROT_READ) || (Segment.InitProt & VM_PROT_EXECUTE) || strncmp(Segment.Name, "__LINKEDIT", 16) == 0)
+            continue;
 
-        if (MatchesAnyLayout(FFixedUObjectArrayLayouts, CurrentAddress))
+        /* Stop 0x50 early so we don't read out of bounds when checking FixedArray->IsValid() or ChunkedArray->IsValid() */
+        if (Segment.End - Segment.Begin <= 0x50)
+            continue;
+
+        for (uintptr CurrentAddress = Segment.Begin; CurrentAddress < (Segment.End - 0x50); CurrentAddress += 0x4)
         {
-            GObjects = reinterpret_cast<uint8*>(SearchBase + i);
-            NumElementsPerChunk = -1;
-
-            Off::InSDK::ObjArray::GObjects = (SearchBase + i) - ImageBase;
-
-            LogSuccess("Found FFixedUObjectArray GObjects at offset 0x%X", Off::InSDK::ObjArray::GObjects);
-
-            ByIndex = [](void* ObjectsArray, int32 Index, uint32 FUObjectItemSize, uint32 FUObjectItemOffset, uint32 PerChunk) -> void*
+            if (MatchesAnyLayout(FFixedUObjectArrayLayouts, CurrentAddress))
             {
-                if (Index < 0 || Index > Num())
-                    return nullptr;
+                GObjects = reinterpret_cast<uint8*>(CurrentAddress);
+                NumElementsPerChunk = -1;
 
-                uint8* ChunkPtr = DecryptPtr(*reinterpret_cast<uint8**>(ObjectsArray));
+                Off::InSDK::ObjArray::GObjects = CurrentAddress - ImageBase;
 
-                return *reinterpret_cast<void**>(ChunkPtr + FUObjectItemOffset + (Index * FUObjectItemSize));
-            };
+                LogSuccess("Found FFixedUObjectArray GObjects at offset 0x%X", Off::InSDK::ObjArray::GObjects);
 
-            uint8* ChunksPtr = DecryptPtr(*reinterpret_cast<uint8**>(GObjects + Off::FUObjectArray::GetObjectsOffset()));
+                ByIndex = [](void* ObjectsArray, int32 Index, uint32 FUObjectItemSize, uint32 FUObjectItemOffset, uint32 PerChunk) -> void*
+                {
+                    if (Index < 0 || Index >= Num())
+                        return nullptr;
 
-            ObjectArray::InitializeFUObjectItem(*reinterpret_cast<uint8**>(ChunksPtr));
+                    uint8* ChunkPtr = DecryptPtr(*reinterpret_cast<uint8**>(ObjectsArray));
 
-            return;
-        }
-        else if (MatchesAnyLayout(FChunkedFixedUObjectArrayLayouts, CurrentAddress))
-        {
-            GObjects = reinterpret_cast<uint8*>(SearchBase + i);
-            NumElementsPerChunk = 0x10000;
-            SizeOfFUObjectItem = 0x18;
-            FUObjectItemInitialOffset = 0x0;
+                    return *reinterpret_cast<void**>(ChunkPtr + FUObjectItemOffset + (Index * FUObjectItemSize));
+                };
 
-            Off::InSDK::ObjArray::GObjects = (SearchBase + i) - ImageBase;
+                uint8* ChunksPtr = DecryptPtr(*reinterpret_cast<uint8**>(GObjects + Off::FUObjectArray::GetObjectsOffset()));
 
-            LogSuccess("Found FChunkedFixedUObjectArray GObjects at offset 0x%X", Off::InSDK::ObjArray::GObjects);
+                ObjectArray::InitializeFUObjectItem(*reinterpret_cast<uint8**>(ChunksPtr));
 
-            ByIndex = [](void* ObjectsArray, int32 Index, uint32 FUObjectItemSize, uint32 FUObjectItemOffset, uint32 PerChunk) -> void*
+                return;
+            }
+            else if (MatchesAnyLayout(FChunkedFixedUObjectArrayLayouts, CurrentAddress))
             {
-                if (Index < 0 || Index > Num())
-                    return nullptr;
+                GObjects = reinterpret_cast<uint8*>(CurrentAddress);
+                NumElementsPerChunk = 0x10000;
+                SizeOfFUObjectItem = 0x18;
+                FUObjectItemInitialOffset = 0x0;
 
-                const int32 ChunkIndex = Index / PerChunk;
-                const int32 InChunkIdx = Index % PerChunk;
+                Off::InSDK::ObjArray::GObjects = CurrentAddress - ImageBase;
 
-                uint8* ChunkPtr = DecryptPtr(*reinterpret_cast<uint8**>(ObjectsArray));
+                LogSuccess("Found FChunkedFixedUObjectArray GObjects at offset 0x%X", Off::InSDK::ObjArray::GObjects);
 
-                uint8* Chunk = reinterpret_cast<uint8**>(ChunkPtr)[ChunkIndex];
-                uint8* ItemPtr = Chunk + (InChunkIdx * FUObjectItemSize);
+                ByIndex = [](void* ObjectsArray, int32 Index, uint32 FUObjectItemSize, uint32 FUObjectItemOffset, uint32 PerChunk) -> void*
+                {
+                    if (Index >= Num())
+                        return nullptr;
 
-                return *reinterpret_cast<void**>(ItemPtr + FUObjectItemOffset);
-            };
-            
-            uint8* ChunksPtr = DecryptPtr(*reinterpret_cast<uint8**>(GObjects + Off::FUObjectArray::GetObjectsOffset()));
+                    return ChunkedByIndexImpl(ObjectsArray, Index, FUObjectItemSize, FUObjectItemOffset, PerChunk, DecryptPtr, GObjects);
+                };
+                
+                uint8* ChunksPtr = DecryptPtr(*reinterpret_cast<uint8**>(GObjects + Off::FUObjectArray::GetObjectsOffset()));
 
-            ObjectArray::InitializeFUObjectItem(*reinterpret_cast<uint8**>(ChunksPtr));
+                ObjectArray::InitializeFUObjectItem(*reinterpret_cast<uint8**>(ChunksPtr));
 
-            ObjectArray::InitializeChunkSize(GObjects + Off::FUObjectArray::GetObjectsOffset());
+                ObjectArray::InitializeChunkSize(GObjects + Off::FUObjectArray::GetObjectsOffset());
 
-            return;
+                return;
+            }
         }
     }
 
-    if (!bScanAllMemory)
-    {
-        LogInfo("Retrying with full memory scan...");
-        ObjectArray::Init(true);
-        return;
-    }
-
-    if (GObjects == nullptr)
-    {
-        LogError("GObjects couldn't be found!");
-        sleep(3);
-        exit(1);
-    }
+    /* Don't kill the game (was 'exit(1)'), let the caller abort the dump. */
+    GObjects = nullptr;
+    ByIndex = nullptr;
+    LogError("GObjects couldn't be found!");
 }
 
 void ObjectArray::Init(int32 GObjectsOffset, const FFixedUObjectArrayLayout& ObjectArrayLayout, const char* const ModuleName)
@@ -376,7 +382,7 @@ void ObjectArray::Init(int32 GObjectsOffset, const FFixedUObjectArrayLayout& Obj
 
 	ByIndex = [](void* ObjectsArray, int32 Index, uint32 FUObjectItemSize, uint32 FUObjectItemOffset, uint32 PerChunk) -> void*
 	{
-		if (Index < 0 || Index > Num())
+		if (Index < 0 || Index >= Num())
 			return nullptr;
 
 		uint8* ItemPtr = *reinterpret_cast<uint8**>(ObjectsArray) + (Index * FUObjectItemSize);
@@ -404,22 +410,43 @@ void ObjectArray::Init(int32 GObjectsOffset, int32 ElementsPerChunk, const FChun
 
 	ByIndex = [](void* ObjectsArray, int32 Index, uint32 FUObjectItemSize, uint32 FUObjectItemOffset, uint32 PerChunk) -> void*
 	{
-		if (Index < 0 || Index > Num())
+		if (Index >= Num())
 			return nullptr;
 
-		const int32 ChunkIndex = Index / PerChunk;
-		const int32 InChunkIdx = Index % PerChunk;
-
-		uint8* Chunk = (*reinterpret_cast<uint8***>(ObjectsArray))[ChunkIndex];
-		uint8* ItemPtr = reinterpret_cast<uint8*>(Chunk) + (InChunkIdx * FUObjectItemSize);
-
-		return *reinterpret_cast<void**>(ItemPtr + FUObjectItemOffset);
+		return ChunkedByIndexImpl(ObjectsArray, Index, FUObjectItemSize, FUObjectItemOffset, PerChunk, DecryptPtr, GObjects);
 	};
 
 	uint8* ChunksPtr = DecryptPtr(*reinterpret_cast<uint8**>(GObjects + Off::FUObjectArray::GetObjectsOffset()));
 
 	ObjectArray::InitializeFUObjectItem(*reinterpret_cast<uint8**>(ChunksPtr));
 	LogSuccess("FChunkedFixedUObjectArray initialized successfully");
+}
+
+void ObjectArray::InitWithKnownLayout(uint8* GObjectsAddress, int32 GObjectsOffset, int32 ElementsPerChunk, const FChunkedFixedUObjectArrayLayout& ObjectArrayLayout, uint32 ItemSize, uint32 ItemObjectOffset)
+{
+	GObjects = GObjectsAddress;
+	NumElementsPerChunk = ElementsPerChunk;
+	SizeOfFUObjectItem = ItemSize;
+	FUObjectItemInitialOffset = ItemObjectOffset;
+
+	Off::FUObjectArray::bIsChunked = true;
+	Off::FUObjectArray::ChunkedFixedLayout = ObjectArrayLayout;
+
+	Off::InSDK::ObjArray::GObjects = GObjectsOffset;
+	Off::InSDK::ObjArray::ChunkSize = ElementsPerChunk;
+	Off::InSDK::ObjArray::FUObjectItemSize = ItemSize;
+	Off::InSDK::ObjArray::FUObjectItemInitialOffset = ItemObjectOffset;
+
+	ByIndex = [](void* ObjectsArray, int32 Index, uint32 FUObjectItemSize, uint32 FUObjectItemOffset, uint32 PerChunk) -> void*
+	{
+		if (Index >= Num())
+			return nullptr;
+
+		return ChunkedByIndexImpl(ObjectsArray, Index, FUObjectItemSize, FUObjectItemOffset, PerChunk, DecryptPtr, GObjects);
+	};
+
+	LogSuccess("ObjectArray: GObjects at offset 0x%X (Objects 0x%X, NumElements 0x%X, NumChunks 0x%X, ItemSize 0x%X, ItemObject 0x%X), %d objects",
+		GObjectsOffset, ObjectArrayLayout.ObjectsOffset, ObjectArrayLayout.NumElementsOffset, ObjectArrayLayout.NumChunksOffset, ItemSize, ItemObjectOffset, Num());
 }
 
 void ObjectArray::DumpObjects(const fs::path& Path, bool bWithPathname)
@@ -484,12 +511,18 @@ void ObjectArray::DumpObjectsWithProperties(const fs::path& Path, bool bWithPath
 
 int32 ObjectArray::Num()
 {
+	if (!GObjects)
+		return 0;
+
 	return *reinterpret_cast<int32*>(GObjects + Off::FUObjectArray::GetNumElementsOffset());
 }
 
 template<typename UEType>
 UEType ObjectArray::GetByIndex(int32 Index)
 {
+	if (!GObjects || !ByIndex)
+		return UEType();
+
 	return UEType(ByIndex(GObjects + Off::FUObjectArray::GetObjectsOffset(), Index, SizeOfFUObjectItem, FUObjectItemInitialOffset, NumElementsPerChunk));
 }
 

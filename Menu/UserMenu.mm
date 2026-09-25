@@ -4,13 +4,11 @@
 #include <thread>
 #include <vector>
 
-// Forward declaration if StartDump isn't in main.h
-void StartDump();
 
 void UserMenu::RenderMenu()
 {
-    CGFloat screenWidth = ([UIApplication sharedApplication].windows[0].rootViewController.view.frame.size.width);
-    CGFloat screenHeight = ([UIApplication sharedApplication].windows[0].rootViewController.view.frame.size.height);
+    // windows[0] can be missing while the game swaps windows, the screen bounds are always valid
+    CGFloat screenWidth = [UIScreen mainScreen].bounds.size.width;
 
     CGFloat windowWidth = 500;
     CGFloat windowHeight = 350;
@@ -25,16 +23,16 @@ void UserMenu::RenderMenu()
     if (ImGui::Begin("Dumper Console", NULL, ImGuiWindowFlags_NoCollapse))
     {
         // --- Top Bar (Buttons) ---
-        if (ImGui::Button("Start Dump"))
+        if (ImGui::Button(IsDumpRunning() ? "Dumping...###StartDump" : "Start Dump###StartDump"))
         {
-            // Run in a detached thread to prevent freezing the UI
-            std::thread([]{
-                StartDump();
-            }).detach();
+            // Non-blocking, the dump runs on its own large-stack thread. Repeated taps are ignored while it runs.
+            StartDump();
         }
         ImGui::SameLine();
         if (ImGui::Button("Copy to Clipboard")) {
-            ImGui::LogToClipboard();
+            // ImGui's clipboard isn't the iOS pasteboard, and the log window only renders visible lines
+            const std::string allText = Console::Get().GetAllText();
+            [UIPasteboard generalPasteboard].string = [NSString stringWithUTF8String:allText.c_str()] ?: @"";
         }
         
         ImGui::Separator();

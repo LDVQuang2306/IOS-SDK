@@ -14,7 +14,7 @@ class UEProperty;
 class UEFFieldClass
 {
 protected:
-	uint8* Class;
+	uint8* Class = nullptr;
 
 public:
 
@@ -51,7 +51,7 @@ public:
 class UEFField
 {
 protected:
-	uint8* Field;
+	uint8* Field = nullptr;
 
 public:
 
@@ -98,7 +98,7 @@ private:
 	static void(*PE)(void*, void*, void*);
 
 protected:
-	uint8* Object;
+	uint8* Object = nullptr;
 
 public:
 
@@ -234,7 +234,7 @@ public:
 class UEProperty
 {
 protected:
-	uint8* Base;
+	uint8* Base = nullptr;
 
 public:
 	UEProperty() = default;

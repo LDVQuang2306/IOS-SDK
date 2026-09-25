@@ -94,12 +94,32 @@ bool bIsMenuOpened = false;
     // Load the menu 3 seconds after application launch, you can adjust this
     CallAfterSeconds(3)
     {
-        GExtraInfo = [MenuLoad new];
-        [GExtraInfo InitializeGestureRecognizers];
-        
-        // Initialize screen dimensions after touch registration
-        ScreenRect.Init();
+        [MenuLoad TryInitialize:0];
     });
+}
+
++ (void)TryInitialize:(int)InAttempt
+{
+    NSArray<UIWindow*>* const Windows = [UIApplication sharedApplication].windows;
+
+    // Unreal creates its window late on slow devices. Indexing an empty 'windows' array throws and kills the game.
+    if (Windows.count == 0 || !Windows[0].rootViewController.view)
+    {
+        if (InAttempt < 120)
+        {
+            CallAfterSeconds(1)
+            {
+                [MenuLoad TryInitialize:InAttempt + 1];
+            });
+        }
+        return;
+    }
+
+    GExtraInfo = [MenuLoad new];
+    [GExtraInfo InitializeGestureRecognizers];
+
+    // Initialize screen dimensions after touch registration
+    ScreenRect.Init();
 }
 
 - (void)InitializeGestureRecognizers
@@ -135,10 +155,15 @@ bool bIsMenuOpened = false;
         GHideRecordView = nil;
     }
 
-    if (GHideRecordView)
+    if (!GHideRecordView)
     {
-        [[UIApplication sharedApplication].windows.firstObject addSubview:GHideRecordView];
+        // The secure text field trick isn't available on this iOS version: use a normal overlay, otherwise the menu is never shown
+        GHideRecordView = [[UIView alloc] initWithFrame:InScreenBounds];
+        GHideRecordView.backgroundColor = [UIColor clearColor];
+        GHideRecordView.userInteractionEnabled = YES;
     }
+
+    [[UIApplication sharedApplication].windows.firstObject addSubview:GHideRecordView];
 }
 
 - (void)InitializeImGuiDrawSystem

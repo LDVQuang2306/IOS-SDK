@@ -9,6 +9,7 @@
 #include "../../../Utils/Utils.h"
 #include "../../../Menu/Logger.h"
 #include "../../../Engine/Public/Unreal/NameArray.h"
+#include "../../../Engine/Public/Unreal/DeltaForce.h"
 
 inline void InitWeakObjectPtrSettings()
 {
@@ -69,22 +70,34 @@ inline void InitSettings()
 }
 
 
-void Generator::InitEngineCore()
+bool Generator::InitEngineCore()
 {
 	LogInfo("Initializing Engine Core...");
-	
+
+	/* Delta Force: modified engine core (encrypted FNamePool, reordered UObject/UStruct/FField). Uses its own validated profile. */
+	if (DeltaForce::IsDeltaForceProcess())
+	{
+		LogInfo("Detected '%s', using the Delta Force engine profile", Settings::DeltaForce::ModuleName);
+
+		if (!DeltaForce::InitEngineCore())
+		{
+			LogError("Engine Core initialization failed, nothing was dumped.");
+			return false;
+		}
+
+		InitSettings();
+		LogSuccess("Engine Core initialized successfully");
+		return true;
+	}
+
 	/* manual override */
-	// ObjectArray::Init(0x12cde518, 0x10000, FChunkedFixedUObjectArrayLayout {
-	// 	.ObjectsOffset = 0x20,
-	// 	.MaxElementsOffset = 0x10,
-	// 	.NumElementsOffset = 0x4,
-	// 	.MaxChunksOffset = 0x0,
-	// 	.NumChunksOffset = 0x14,
-	// }, "DeltaForceClient");
+	//ObjectArray::Init(/*GObjectsOffset*/, /*ElementsPerChunk*/, FChunkedFixedUObjectArrayLayout { ... }, /*ModuleName*/);
 
 	//FName::Init(/*FName::AppendString*/);
 	//FName::Init(/*FName::ToString, FName::EOffsetOverrideType::ToString*/);
 	//FName::Init(/*GNames, FName::EOffsetOverrideType::GNames, true/false*/);
+	//FName::Init((int32)0x0CB41B80, FName::EOffsetOverrideType::GNames, true, "UAGame"); // ArenaBreakout
+	//FName::Init((int32)0x05E4AD40, FName::EOffsetOverrideType::GNames, true, "ShooterGame"); // ARK Revamp
 	//Off::InSDK::ProcessEvent::InitPE(/*PEIndex*/);
 
 	/* Back4Blood (requires manual GNames override) */
@@ -94,13 +107,22 @@ void Generator::InitEngineCore()
 	//InitObjectArrayDecryption([](void* ObjPtr) -> uint8* { return reinterpret_cast<uint8*>(uint64(ObjPtr) ^ 0x1B5DEAFD6B4068C); });
 
 	ObjectArray::Init();
-//    FName::Init((int32)0x0CB41B80, FName::EOffsetOverrideType::GNames, true, "UAGame"); // ArenaBreakout
-    //    FName::Init((int32)0x05E4AD40, FName::EOffsetOverrideType::GNames, true, "ShooterGame"); // ARK Revamp
-    FName::Init((int32)0x1290abc0, FName::EOffsetOverrideType::GNames, false /* Not FNamePool */, "DeltaForceClient"); // ARK 2.0
-//    FName::Init();
+
+	if (!ObjectArray::IsInitialized())
+	{
+		LogError("Engine Core initialization failed: GObjects not found.");
+		return false;
+	}
+
+	FName::Init();
+
 	Off::Init();
 	PropertySizes::Init();
-	Off::InSDK::ProcessEvent::InitPE(69); //Must be at this position, relies on offsets initialized in Off::Init()
+
+	Off::InSDK::ProcessEvent::InitPE(); //Must be at this position, relies on offsets initialized in Off::Init()
+
+	if (Off::InSDK::ProcessEvent::PEIndex <= 0)
+		Off::InSDK::ProcessEvent::InitPE(0x45); // Common index on iOS (UE4.2x), adjust if the SDK's ProcessEvent is wrong
 
 	Off::InSDK::World::InitGWorld(); //Must be at this position, relies on offsets initialized in Off::Init()
 
@@ -108,6 +130,7 @@ void Generator::InitEngineCore()
 
 	InitSettings();
 	LogSuccess("Engine Core initialized successfully");
+	return true;
 }
 
 void Generator::InitInternal()

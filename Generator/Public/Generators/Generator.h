@@ -1,7 +1,7 @@
 #pragma once
 
 #include <filesystem>
-#include <concepts>  // <--- THÊM DÒNG NÀY
+#include <concepts>
 
 #include "../../../Engine/Public/Unreal/ObjectArray.h"
 #include "../Managers/DependencyManager.h"
@@ -45,7 +45,8 @@ private:
     static inline bool bDumpedGObjects = false;
 
 public:
-    static void InitEngineCore();
+    /* Returns false (after logging the reason) if the engine core couldn't be initialized safely. */
+    static bool InitEngineCore();
     static void InitInternal();
 
 private:

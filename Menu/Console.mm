@@ -17,19 +17,34 @@ static std::string GetTimeStr() {
     return std::string(buf);
 }
 
-void Console::log(const std::string& text) {
+void Console::push(const std::string& text, int type) {
     std::lock_guard<std::mutex> lock(logMutex);
-    outputArr.push_back({ text, GetTimeStr(), 0 });
+    outputArr.push_back({ text, GetTimeStr(), type });
+
+    while (outputArr.size() > MaxLines)
+        outputArr.pop_front();
+}
+
+void Console::log(const std::string& text) {
+    push(text, 0);
 }
 
 void Console::logError(const std::string& text) {
-    std::lock_guard<std::mutex> lock(logMutex);
-    outputArr.push_back({ text, GetTimeStr(), 1 });
+    push(text, 1);
 }
 
 void Console::logInfo(const std::string& text) {
+    push(text, 2);
+}
+
+std::string Console::GetAllText() {
     std::lock_guard<std::mutex> lock(logMutex);
-    outputArr.push_back({ text, GetTimeStr(), 2 });
+
+    std::string result;
+    for (const auto& output : outputArr)
+        result += "[" + output.time + "] " + output.text + "\n";
+
+    return result;
 }
 
 void Console::clearLogs() {
@@ -55,31 +70,34 @@ void Console::Render() {
         
         ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(4, 1)); // Tighter spacing for log lines
 
-        for (const auto& output : outputArr)
+        /* Only submit the visible lines */
+        ImGuiListClipper clipper;
+        clipper.Begin(static_cast<int>(outputArr.size()));
+
+        while (clipper.Step())
         {
-            // Determine Color based on integer type (0=Log, 1=Error, 2=Success)
-            ImVec4 color = ImVec4(1.0f, 1.0f, 1.0f, 1.0f); // Default White
+            for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; i++)
+            {
+                const Output& output = outputArr[i];
 
-            if (output.type == 1) { // Error
-                color = ImVec4(1.0f, 0.4f, 0.4f, 1.0f); // Red
-            } else if (output.type == 2) { // Success
-                color = ImVec4(0.4f, 1.0f, 0.4f, 1.0f); // Green
-            } else { // Log/Info (Type 0)
-                color = ImVec4(0.4f, 0.8f, 1.0f, 1.0f); // Blue/Cyan
+                // Determine Color based on integer type (0=Log, 1=Error, 2=Success)
+                ImVec4 color = ImVec4(0.4f, 0.8f, 1.0f, 1.0f); // Log/Info (Type 0): Blue/Cyan
+
+                if (output.type == 1) { // Error
+                    color = ImVec4(1.0f, 0.4f, 0.4f, 1.0f); // Red
+                } else if (output.type == 2) { // Success
+                    color = ImVec4(0.4f, 1.0f, 0.4f, 1.0f); // Green
+                }
+
+                ImGui::PushStyleColor(ImGuiCol_Text, color);
+
+                const std::string line = output.time.empty() ? output.text : "[" + output.time + "] " + output.text;
+                ImGui::TextUnformatted(line.c_str());
+
+                ImGui::PopStyleColor();
             }
-
-            ImGui::PushStyleColor(ImGuiCol_Text, color);
-
-            // Format: [Time] Text (incorporating drawTime logic from previous fixes)
-            std::string line = output.text;
-            if (!output.time.empty()) {
-                line = "[" + output.time + "] " + line;
-            }
-
-            ImGui::TextUnformatted(line.c_str());
-            ImGui::PopStyleColor();
         }
-        
+
         ImGui::PopStyleVar();
 
         // Auto-scroll logic

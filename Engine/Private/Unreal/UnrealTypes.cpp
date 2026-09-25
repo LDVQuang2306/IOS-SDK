@@ -208,6 +208,35 @@ void FName::Init(int32 OverrideOffset, EOffsetOverrideType OverrideType, bool bI
 	LogSuccess("Manual-Override: FName::%s --> Offset 0x%X", (Off::InSDK::Name::bIsUsingAppendStringOverToString ? "AppendString" : "ToString"), Off::InSDK::Name::AppendNameToString);
 }
 
+void FName::InitWithNameArray()
+{
+	Off::InSDK::Name::AppendNameToString = 0x0;
+	Off::InSDK::Name::bIsUsingAppendStringOverToString = true;
+
+	ToStr = [](const void* Name) -> UnrealString
+	{
+		const FName TypedName(Name);
+
+		UnrealString BaseName = NameArray::GetCachedName(TypedName.GetCompIdx());
+
+		if (Settings::Internal::bUseOutlineNumberName)
+			return BaseName;
+
+		const uint32 Number = TypedName.GetNumber();
+
+		if (Number == 0)
+			return BaseName;
+
+		/* FName::ToString prints 'Number - 1' as a signed 32-bit value */
+		const uint32 Bits = Number - 1u;
+		const int64 Suffix = Bits <= 0x7FFFFFFFu ? static_cast<int64>(Bits) : static_cast<int64>(Bits) - 0x100000000LL;
+
+		return BaseName + TEXT('_') + ToUEString(Suffix);
+	};
+
+	LogSuccess("FName: resolving names through NameArray (cached)");
+}
+
 void FName::InitFallback()
 {
 	Off::InSDK::Name::bIsUsingAppendStringOverToString = false;
@@ -234,7 +263,7 @@ void FName::InitFallback()
 
 UnrealString FName::ToRawWString() const
 {
-	if (!Address)
+	if (!Address || !ToStr)
 		return TEXT("None");
 
 	return ToStr(Address);

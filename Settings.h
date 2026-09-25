@@ -1,10 +1,18 @@
 #pragma once
 
 #include <string>
+#include <cstdint>
 
 #include "Engine/Public/Unreal/Enums.h"
 
-#define UEVERSION 417
+/*
+* Engine version of the target game.
+*  - >= 421: TCHAR is char16_t (UTF-16). Required for every FNamePool/FProperty game, including Delta Force (UE4.26+).
+*  -  < 421: TCHAR is wchar_t (legacy UE4.17-4.20 iOS builds).
+*/
+#ifndef UEVERSION
+#define UEVERSION 426
+#endif
 
 
 #if UEVERSION >= 421
@@ -50,7 +58,24 @@ namespace Settings
 		inline std::string GameName = "";
 		inline std::string GameVersion = "";
 
-        inline const char* SDKGenerationPath = getenv("HOME");
+		/* The SDK is written to <SDKGenerationPath>/Documents/<GameVersion>-<GameName>/ */
+		inline const char* SDKGenerationPath = getenv("HOME");
+	}
+
+	namespace DeltaForce
+	{
+		/* Name of the main executable. The Delta Force profile is only used when this image is loaded. */
+		constexpr const char* ModuleName = "DeltaForceClient";
+
+		/*
+		* Optional manual overrides (RVA = address - image base). 0 = discover automatically by scanning the data segments.
+		* A manual value is validated before use and ignored if it doesn't point to a valid FNamePool/FUObjectArray.
+		*/
+		inline uint64_t GNamesRVA = 0x0;
+		inline uint64_t GObjectsRVA = 0x0;
+
+		/* VTable index of UObject::ProcessEvent written to the SDK when the ARM64 heuristic can't find it. The dumper itself never calls ProcessEvent. */
+		inline int32_t FallbackProcessEventIndex = 0x45;
 	}
 
 	namespace CppGenerator
@@ -70,7 +95,24 @@ namespace Settings
 		/* Customizable part of Cpp code to allow for a custom 'uintptr_t InSDKUtils::GetImageBase()' function */
 		constexpr const char* GetImageBaseFuncBody = 
 R"({
-	return reinterpret_cast<uintptr_t>(_dyld_get_image_vmaddr_slide(0));
+	/* Offsets in this SDK are relative to the mach header of the main executable (NOT the ASLR slide). */
+	static uintptr_t ImageBase = 0x0;
+
+	if (ImageBase == 0x0)
+	{
+		for (uint32_t i = 0; i < _dyld_image_count(); i++)
+		{
+			const auto* Header = reinterpret_cast<const struct mach_header_64*>(_dyld_get_image_header(i));
+
+			if (Header && Header->filetype == MH_EXECUTE)
+			{
+				ImageBase = reinterpret_cast<uintptr_t>(Header);
+				break;
+			}
+		}
+	}
+
+	return ImageBase;
 }
 )";
 		/* Customizable part of Cpp code to allow for a custom 'InSDKUtils::CallGameFunction' function */
@@ -153,5 +195,11 @@ R"(
 
 		/* Whether this games' engine version uses double for FVector, instead of float. Aka, whether the engine version is UE5.0 or higher. */
 		inline bool bUseLargeWorldCoordinates = false;
+
+		/* Resolve EClassCastFlags from the class/field-class names instead of reading UClass::CastFlags/FFieldClass::CastFlags (Delta Force). */
+		inline bool bUseNameBasedCastFlags = false;
+
+		/* Set when the game-specific (Delta Force) engine profile initialized the engine core. */
+		inline bool bIsDeltaForce = false;
 	}
 }
