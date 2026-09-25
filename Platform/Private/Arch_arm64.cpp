@@ -144,8 +144,10 @@ namespace Architecture_x86_64
         }
     }
 
-    int32_t FindProcessEventIndex(void** UObjectVTable)
+    int32_t FindProcessEventIndex(void** UObjectVTable, int32_t* OutScore)
     {
+        if (OutScore) *OutScore = 0;
+
         if (!UObjectVTable || IsBadReadPtr(UObjectVTable)) return -1;
 
         constexpr int MaxSlots  = 100;
@@ -167,7 +169,12 @@ namespace Architecture_x86_64
             void* FuncPtr = nullptr;
             if (IsBadReadPtr(&UObjectVTable[slot])) break;
             FuncPtr = UObjectVTable[slot];
-            if (!FuncPtr || IsBadReadPtr(FuncPtr) || IsBadReadPtr((uint8_t*)FuncPtr + (InsnCount * 4) - 1))
+
+            /* The vtable ends where entries stop pointing into the image */
+            if (!FuncPtr || !IsInProcessRange(reinterpret_cast<uintptr_t>(FuncPtr)))
+                break;
+
+            if (IsBadReadRange(FuncPtr, InsnCount * 4))
                 continue;
 
             const uint32_t* Insns = reinterpret_cast<const uint32_t*>(FuncPtr);
@@ -216,6 +223,8 @@ namespace Architecture_x86_64
                 BestIdx   = slot;
             }
         }
+
+        if (OutScore) *OutScore = BestScore;
 
         return BestIdx;
     }

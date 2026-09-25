@@ -41,6 +41,6 @@ namespace Architecture_x86_64
 	 * Caller must have populated Off::UObject::Index, Off::InSDK::ObjArray::FUObjectItemSize,
 	 * Off::UFunction::FunctionFlags, Off::UStruct::Size, Off::UStruct::ChildProperties
 	 * (or .Children), and Off::InSDK::ObjArray::GObjects before invoking.
-	 * Returns -1 on failure. */
-	int32_t FindProcessEventIndex(void** UObjectVTable);
+	 * Returns -1 on failure. OutScore receives the number of fingerprints (0-7) the returned slot matched. */
+	int32_t FindProcessEventIndex(void** UObjectVTable, int32_t* OutScore = nullptr);
 }

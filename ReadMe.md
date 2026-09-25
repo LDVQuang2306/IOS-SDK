@@ -1,118 +1,111 @@
 # iOS-Dumper-7_THEOS
 
-**iOS-Dumper-7** is a runtime SDK generator for Unreal Engine games running on iOS. It injects into the game process to dynamically analyze memory, resolve offsets, and generate a full C++ SDK, IDA scripts, and symbol dumps.
+**iOS-Dumper-7** is a runtime SDK generator for Unreal Engine games running on iOS. It injects into the game process, locates the engine's reflection data in memory and generates a full C++ SDK, IDA mappings, USMAP mappings, Dumpspace JSON and a `UEOffsets.hpp` summary.
+
+This is the Theos build of [Aethereux/iOS-Dumper-7](https://github.com/Aethereux/iOS-Dumper-7) (itself a port of [Encryqed/Dumper-7](https://github.com/Encryqed/Dumper-7)), with additional work to make it dump **Delta Force** reliably and without crashing the game.
 
 ## Features
 
-* **Runtime Generation**: Generates C++ SDK headers, IDA Mappings (`.idmap`), and JSON dumps directly on the device.
-* **Dynamic Offset Scanning**: Automatically finds `GObjects`, `GNames`, and `UWorld` without requiring hardcoded offsets for most games.
-* **Broad Compatibility**: Tested on Unreal Engine versions **4.17** to **4.26** (e.g., ARK 2.0, Ark Revamp, Special Forces 3).
-* **Floating UI**: Uses a draggable floating button to toggle the menu, avoiding conflict with game gestures.
+* **No hard-coded offsets needed**: `GObjects`, `GNames`, `ProcessEvent` and `GWorld` are searched at runtime.
+* **Delta Force support**:
+  * the reordered `FChunkedFixedUObjectArray` members are detected automatically (known layouts first, then a layout-agnostic search that works when a client update shuffles the members again),
+  * the XOR-encrypted `FNameEntry` strings are detected from the `"None"` / `"ByteProperty"` entries at the start of the `FNamePool`, and the decryption is installed and emitted into the generated SDK automatically.
+* **Data-anchored GNames search**: the `FNamePool` (UE4.23+) or `TNameEntryArray` (UE4.22 and below) is located through its data, not through code patterns that break with every update.
+* **ARM64 ProcessEvent detection**: the UObject vtable is scored against ProcessEvent fingerprints. ProcessEvent is only ever called if it was identified with high confidence.
+* **Crash safety**: every scan stays inside mapped memory, a failed step aborts the dump with an error message instead of taking the game down, and everything is logged to a file.
 
 ## Usage
 
 ### 1. Build
 
-1. Open the project on device install theos.
-2. Open folder open terminal and 'make'.
-3. project to generate the folder '.theos/obj' `.dylib` file (e.g., `LDVQuangDumper.dylib`).
+1. Install [Theos](https://theos.dev) (on device, macOS or Linux).
+2. Open a terminal in the project folder and run `make` (or `make package`).
+3. The dylib (`LDVQuangDumper.dylib`) is written to `.theos/obj/`.
 
 ### 2. Inject
 
-Use any signer (Sideloadly, ESign, GBox or whatever Signer that supports dylib injection) and inject the dylib
+Use any signer that supports dylib injection (Sideloadly, ESign, GBox, TrollStore + Choicy, ...) and inject the dylib.
 
 ### 3. Dump
 
-1. **Launch the game** and wait for the engine to fully load.
-2. After approximately **3 seconds**, a **Floating Logo Button** will appear on the screen.
-3. **Tap the Logo** to open the ImGui overlay.
-* *Note: You can drag the logo to move it if it obstructs the game UI.*
+1. **Launch the game** and wait until it is fully loaded (lobby / main menu).
+2. About **3 seconds** after launch a floating button appears (a logo, or a dark `D7` button without network access).
+3. **Tap the button** to open the menu. Drag it if it covers the game UI.
+4. Tap **Start Dump** and wait until `Generating SDK took ...` is printed.
 
-
-4. Tap **Start Dump** in the menu.
-5. Wait for the process to complete.
+If the dump is started too early, it stops with an error ("GObjects wasn't found ..."), nothing is modified and **Start Dump** can simply be pressed again later.
 
 ### 4. Output
 
-The generated files will be saved to your device's Documents directory (Make Sure to enable "Supports Document Browser" before signing):
-`/Documents/[GameVersion-GameName]/`
+Everything is saved to the app's Documents directory (enable "Supports Document Browser" before signing to access it from the Files app):
+
+```
+Documents/
+├── Dumper-7.log                        # full log of the last run, written while dumping
+└── [GameVersion-GameName]/
+    ├── CppSDK/                          # C++ SDK headers
+    ├── Mappings/                        # USMAP
+    ├── IDAMappings/                     # .idmap for IDA
+    ├── Dumpspace/                       # Dumpspace JSON
+    ├── GObjects-Dump.txt
+    ├── GObjects-Dump-WithProperties.txt
+    └── UEOffsets.hpp                    # every discovered offset in one header
+```
+
+If something goes wrong, `Dumper-7.log` (or **Copy to Clipboard** in the menu) contains the full log.
 
 ---
 
 ## Configuration & Overrides
 
-If the dumper fails to find offsets automatically (common in games with encryption or obfuscation), you can manually configure overrides in **`Dumper/Generator/Private/Generators/Generator.cpp`** inside the `Generator::InitEngineCore()` function.
-
-### 1. GObjects (Global Object Array)
-
-If the auto-scan fails, provide the address and layout manually:
+Everything is auto-detected by default. Only if auto-detection fails (for example after a game update changed something new), set overrides in **`Generator/Private/Generators/Generator.cpp`** (`namespace DumperOverrides`). Overrides that don't validate are ignored and auto-detection is used instead, so an outdated offset can't crash the game.
 
 ```cpp
-// For older UE4 (Fixed Layout)
-ObjectArray::Init(0x12345678, FFixedUObjectArrayLayout {
-    .ObjectsOffset = 0x0,
-    .MaxObjectsOffset = 0x8,
-    .NumObjectsOffset = 0xC
-});
+namespace DumperOverrides
+{
+    /* Offset of the TUObjectArray (FUObjectArray::ObjObjects), 0 = auto */
+    constexpr int32 GObjectsOffset = 0x0;
+    constexpr int32 GObjectsElementsPerChunk = 0x10000;
 
-// For UE4.21+ / UE5 (Chunked Layout)
-ObjectArray::Init(0x12345678, 0x10000 /* ElementsPerChunk */, FChunkedFixedUObjectArrayLayout {
-    .ObjectsOffset = 0x00,
-    .MaxElementsOffset = 0x10,
-    .NumElementsOffset = 0x14,
-    .MaxChunksOffset = 0x18,
-    .NumChunksOffset = 0x1C
-});
+    /* Delta Force example layout */
+    constexpr FChunkedFixedUObjectArrayLayout GObjectsLayout = FChunkedFixedUObjectArrayLayout{
+        .ObjectsOffset = 0x20, .MaxElementsOffset = 0x10, .NumElementsOffset = 0x04, .MaxChunksOffset = 0x00, .NumChunksOffset = 0x14
+    };
 
+    /* FNamePool (true, UE4.23+) or the global TNameEntryArray* (false, UE4.22-), 0 = auto */
+    constexpr int32 GNamesOffset = 0x0;
+    constexpr bool bGNamesIsNamePool = true;
+
+    /* Vtable index of UObject::ProcessEvent, -1 = auto */
+    constexpr int32 ProcessEventIndex = -1;
+}
 ```
 
-### 2. GNames (Global Name Array)
+### Decryption hooks
 
-If `GNames` is not found via pattern scanning, initialize it manually:
+For games that encrypt other things, install a hook at the top of `Generator::InitEngineCore()` (before GObjects/GNames are searched). Delta Force doesn't need any of these.
 
 ```cpp
-// Address, Mode, bIsNamePool, ModuleName (Optional)
-FName::Init(0x10203040, FName::EOffsetOverrideType::GNames, true /* true for NamePool */, "UAGame");
-
+InitObjectArrayDecryption([](void* ObjPtr) -> uint8* { return reinterpret_cast<uint8*>(uint64(ObjPtr) ^ 0x8375); });
+InitNameStringDecryption([](std::string Decoded) -> std::string { /* ... */ return Decoded; });
+InitNameEntryDecryption([](uint8_t* Entry) -> uint8_t* { return Entry; });
+InitNameArrayDecryption([](uintptr_t Start) -> uintptr_t { return Start; });
+InitNamePoolDecryption([](uintptr_t Start) -> uintptr_t { return Start; });
 ```
 
-### 3. Pointer Decryption
+### Other settings (`Settings.h`)
 
-For games that encrypt pointers (e.g. IDK What Games Have ObjectArray Encrypted), define a decryption lambda:
-
-```cpp
-// Example: XOR decryption
-ObjectArray::InitDecryption([](void* ObjPtr) -> uint8* {
-    return reinterpret_cast<uint8*>(uint64(ObjPtr) ^ 0x8375ACDE);
-});
-
-```
-
-### 4. ProcessEvent
-
-If the virtual table index for `ProcessEvent` is incorrect:
-
-```cpp
-// Manually set the VTable index
-Off::InSDK::ProcessEvent::InitPE(69); 
-
-```
+* `UEVERSION`: selects the `TCHAR` width of `FString` (UE4.21+ uses 16-bit characters on iOS, older versions 32-bit). Default `426`.
+* `Settings::General::DefaultModuleName`: Mach-O image that contains the engine. `nullptr` = main executable (correct for Delta Force).
+* `Settings::Config::bCallProcessEvent`: set to `false` if a game doesn't tolerate ProcessEvent calls from the dumper (only used to probe the FText layout and to log the engine version).
 
 ---
 
 ## Credits
 
-* **Encryqed**: Original creator of [Dumper-7](https://github.com/Encryqed/Dumper-7).
-* **Aethereux**: Ported and adapted for iOS/ARM64 [upload ios dumper] (https://github.com/Aethereux/iOS-Dumper-7).
-* **LDVQuang2306**: Convert xcode to theos
+* **Encryqed**: original creator of [Dumper-7](https://github.com/Encryqed/Dumper-7).
+* **Aethereux**: iOS/ARM64 port ([iOS-Dumper-7](https://github.com/Aethereux/iOS-Dumper-7)), including the Delta Force name decryption and the ProcessEvent vtable scorer.
+* **MJx0**: [AndUEDumper / iOS_UEDumper](https://github.com/MJx0/AndUEDumper), ProcessEvent scoring algorithm.
+* **LDVQuang2306**: Xcode to Theos conversion.
 
-
-* Contributions are Highly Appreciated for more improvements!
-
-## TODO
-
-- Find ProcessEvent Offset in the Memory (Not Manual Overwrites)
-- Find NamesArray (For UE below 4.22) in Memory
-- Fix Fallback Methods in Finding FNames (AppendString at UnrealTypes.cpp)
-- Tool have something error
-
+Contributions are highly appreciated!

@@ -74,121 +74,67 @@ FName::FName(const void* Ptr)
 {
 }
 
-// @@TODO: Fix this
-void FName::Init(bool bForceGNames)
+void FName::SetGNamesToStr()
 {
-	LogInfo("Initializing FName system%s...", bForceGNames ? " (Forcing GNames)" : "");
-	
-	constexpr std::array<const char*, 6> PossibleSigs =
-	{
-		"48 8D ? ? 48 8D ? ? E8",
-		"48 8D ? ? ? 48 8D ? ? E8",
-		"48 8D ? ? 49 8B ? E8",
-		"48 8D ? ? ? 49 8B ? E8",
-		"48 8D ? ? 48 8B ? E8"
-		"48 8D ? ? ? 48 8B ? E8",
-        "? ? ? D1 ? ? ? A9 ? ? ? A9 ? ? ? A9 ? ? ? 91 F3 03 00 AA ? ? ? F0 ? ? ? F9 ? ? ? F9 ? ? ? F9 ? ? ? F0",
-	};
-
-	LogInfo("Searching for ForwardShadingQuality_ string...");
-	MemAddress StringRef = FindByStringInAllSections("ForwardShadingQuality_");
-	LogInfo("StringRef: 0x%p", (void*)StringRef);
-
-	LogInfo("Searching for AppendString function using patterns...");
-	int i = 0;
-	while (!AppendString && i < PossibleSigs.size())
-	{
-		LogInfo("Trying pattern %d: %s", i, PossibleSigs[i]);
-		AppendString = static_cast<void(*)(const void*, FString&)>(StringRef.RelativePattern(PossibleSigs[i], 0x50, -1 /* auto */));
-		if (AppendString)
-			LogSuccess("Found AppendString with pattern %d at 0x%p", i, (void*)AppendString);
-		i++;
-	}
-	if (!AppendString)
-		LogInfo("AppendString not found via patterns");
-
-	Off::InSDK::Name::AppendNameToString = AppendString && !bForceGNames ? GetOffset((void*)AppendString) : 0x0;
-
-	if (!AppendString || bForceGNames)
-	{
-		LogInfo("Attempting to initialize via NameArray (AppendString=%p, bForceGNames=%d)", (void*)AppendString, bForceGNames);
-		const bool bInitializedSuccessfully = NameArray::TryInit();
-
-		if (bInitializedSuccessfully)
-		{
-			ToStr = [](const void* Name) -> UnrealString
-			{
-				if (!Settings::Internal::bUseOutlineNumberName)
-				{
-					const uint32 Number = FName(Name).GetNumber();
-
-                    if (Number > 0)
-                        return NameArray::GetNameEntry(Name).GetWString() + TEXT('_') + ToUEString(Number - 1);
-				}
-
-				return NameArray::GetNameEntry(Name).GetWString();
-			};
-
-			LogSuccess("FName initialization complete via NameArray");
-			return;
-		}
-		else /* Attempt to find FName::ToString as a final fallback */
-		{
-			LogInfo("NameArray initialization failed, trying fallback ToString method");
-			/* Initialize GNames offset without committing to use GNames during the dumping process or in the SDK */
-			NameArray::SetGNamesWithoutCommiting();
-			FName::InitFallback();
-		}
-	}
-
-	LogInfo("Setting GNames without committing");
-	/* Initialize GNames offset without committing to use GNames during the dumping process or in the SDK */
-	NameArray::SetGNamesWithoutCommiting();
-
-	LogSuccess("Found FName::%s at Offset 0x%X", (Off::InSDK::Name::bIsUsingAppendStringOverToString ? "AppendString" : "ToString"), Off::InSDK::Name::AppendNameToString);
-
-	LogInfo("Setting up final ToStr lambda with AppendString");
 	ToStr = [](const void* Name) -> UnrealString
 	{
-		thread_local FFreableString TempString(1024);
+		if (!Settings::Internal::bUseOutlineNumberName)
+		{
+			const uint32 Number = FName(Name).GetNumber();
 
-		AppendString(Name, TempString);
+			if (Number > 0)
+				return NameArray::GetNameEntry(Name).GetWString() + TEXT('_') + ToUEString(Number - 1);
+		}
 
-		UnrealString OutputString = TempString.ToWString();
-		TempString.ResetNum();
-
-		return OutputString;
+		return NameArray::GetNameEntry(Name).GetWString();
 	};
-	
-	LogSuccess("FName::Init completed successfully");
 }
 
-void FName::Init(int32 OverrideOffset, EOffsetOverrideType OverrideType, bool bIsNamePool, const char* const ModuleName)
+bool FName::Init(bool bForceGNames)
+{
+	LogInfo("Initializing FName system...");
+
+	/* GNames (FNamePool / TNameEntryArray) is located through its data, which also detects Delta Force's name encryption. */
+	if (NameArray::TryInit())
+	{
+		SetGNamesToStr();
+		Off::InSDK::Name::AppendNameToString = 0x0;
+
+		LogSuccess("FName initialization complete via GNames");
+		return true;
+	}
+
+	/*
+	* Upstream falls back to FName::AppendString found by x86 code patterns. On ARM64 those patterns only match random functions,
+	* and calling a wrong function with (FName*, FString&) crashes the game, so there is no automatic fallback here.
+	* If you know the address, use FName::Init(Offset, FName::EOffsetOverrideType::AppendString).
+	*/
+	LogError("FName::Init: GNames couldn't be found or used");
+	return false;
+}
+
+bool FName::Init(int32 OverrideOffset, EOffsetOverrideType OverrideType, bool bIsNamePool, const char* const ModuleName)
 {
 	if (OverrideType == EOffsetOverrideType::GNames)
 	{
-		const bool bInitializedSuccessfully = NameArray::TryInit(OverrideOffset, bIsNamePool, ModuleName);
+		if (!NameArray::TryInit(OverrideOffset, bIsNamePool, ModuleName))
+			return false;
 
-		if (bInitializedSuccessfully)
-		{
-			ToStr = [](const void* Name) -> UnrealString
-			{
-				if (!Settings::Internal::bUseOutlineNumberName)
-				{
-					const uint32 Number = FName(Name).GetNumber();
-
-					if (Number > 0)
-						return NameArray::GetNameEntry(Name).GetWString() + TEXT('_') + ToUEString(Number - 1);
-				}
-
-				return NameArray::GetNameEntry(Name).GetWString();
-			};
-		}
-
-		return;
+		SetGNamesToStr();
+		Off::InSDK::Name::AppendNameToString = 0x0;
+		return true;
 	}
 
-	AppendString = reinterpret_cast<void(*)(const void*, FString&)>(GetModuleBase(ModuleName) + OverrideOffset);
+	const uintptr_t ImageBase = GetModuleBase(ModuleName);
+	const uintptr_t FunctionAddress = ImageBase + OverrideOffset;
+
+	if (!ImageBase || OverrideOffset <= 0 || (FunctionAddress & 0x3) != 0 || !IsInProcessRange(FunctionAddress) || IsBadReadPtr(FunctionAddress))
+	{
+		LogError("Manual-Override: FName::%s offset 0x%X is invalid", OverrideType == EOffsetOverrideType::AppendString ? "AppendString" : "ToString", OverrideOffset);
+		return false;
+	}
+
+	AppendString = reinterpret_cast<void(*)(const void*, FString&)>(FunctionAddress);
 
 	Off::InSDK::Name::AppendNameToString = OverrideOffset;
 	Off::InSDK::Name::bIsUsingAppendStringOverToString = OverrideType == EOffsetOverrideType::AppendString;
@@ -206,6 +152,7 @@ void FName::Init(int32 OverrideOffset, EOffsetOverrideType OverrideType, bool bI
 	};
 
 	LogSuccess("Manual-Override: FName::%s --> Offset 0x%X", (Off::InSDK::Name::bIsUsingAppendStringOverToString ? "AppendString" : "ToString"), Off::InSDK::Name::AppendNameToString);
+	return true;
 }
 
 void FName::InitFallback()
@@ -234,7 +181,7 @@ void FName::InitFallback()
 
 UnrealString FName::ToRawWString() const
 {
-	if (!Address)
+	if (!Address || !ToStr)
 		return TEXT("None");
 
 	return ToStr(Address);
@@ -277,6 +224,9 @@ std::string FName::ToValidString() const
 
 int32 FName::GetCompIdx() const 
 {
+	if (!Address)
+		return 0;
+
 	return *reinterpret_cast<const int32*>(Address + Off::FName::CompIdx);
 }
 
@@ -309,7 +259,7 @@ std::string FName::CompIdxToString(int CmpIdx)
 		{
 			int CompIdx;
 			uint8 Pad[0x4];
-		} Name(CmpIdx);
+		} Name{ CmpIdx };
 
 		return FName(&Name).ToString();
 	}
@@ -319,7 +269,7 @@ std::string FName::CompIdxToString(int CmpIdx)
 		{
 			int CompIdx;
 			uint8 Pad[0xC];
-		} Name(CmpIdx);
+		} Name{ CmpIdx };
 
 		return FName(&Name).ToString();
 	}

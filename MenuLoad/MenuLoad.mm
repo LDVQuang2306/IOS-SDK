@@ -87,6 +87,31 @@ bool bIsMenuOpened = false;
     return _ImGuiView;
 }
 
+/* Creates the menu once the game has a window. Retries instead of touching a window that doesn't exist yet. */
++ (void)TryInitializeMenu:(int)RemainingAttempts
+{
+    if (GExtraInfo)
+        return;
+
+    if (!GetMainView())
+    {
+        if (RemainingAttempts > 0)
+        {
+            CallAfterSeconds(1)
+            {
+                [MenuLoad TryInitializeMenu:RemainingAttempts - 1];
+            });
+        }
+        return;
+    }
+
+    GExtraInfo = [MenuLoad new];
+    [GExtraInfo InitializeGestureRecognizers];
+
+    // Initialize screen dimensions after touch registration
+    ScreenRect.Init();
+}
+
 + (void)load
 {
     [super load];
@@ -94,17 +119,13 @@ bool bIsMenuOpened = false;
     // Load the menu 3 seconds after application launch, you can adjust this
     CallAfterSeconds(3)
     {
-        GExtraInfo = [MenuLoad new];
-        [GExtraInfo InitializeGestureRecognizers];
-        
-        // Initialize screen dimensions after touch registration
-        ScreenRect.Init();
+        [MenuLoad TryInitializeMenu:120];
     });
 }
 
 - (void)InitializeGestureRecognizers
 {
-    UIView* const MainApplicationView = [UIApplication sharedApplication].windows[0].rootViewController.view;
+    UIView* const MainApplicationView = GetMainView();
     const CGRect ScreenBounds = [[UIScreen mainScreen] bounds];
 
 
@@ -132,13 +153,13 @@ bool bIsMenuOpened = false;
     }
     else
     {
-        GHideRecordView = nil;
+        /* The secure-textfield layer isn't available on every iOS version. Without this fallback the menu would never show up. */
+        GHideRecordView = [[UIView alloc] initWithFrame:InScreenBounds];
+        GHideRecordView.backgroundColor = [UIColor clearColor];
+        GHideRecordView.userInteractionEnabled = NO;
     }
 
-    if (GHideRecordView)
-    {
-        [[UIApplication sharedApplication].windows.firstObject addSubview:GHideRecordView];
-    }
+    [GetMainWindow() addSubview:GHideRecordView];
 }
 
 - (void)InitializeImGuiDrawSystem
@@ -172,18 +193,15 @@ bool bIsMenuOpened = false;
             @autoreleasepool
             {
                 NSData* const DownloadedImageData = [NSData dataWithContentsOfURL:AnimatedImageURL];
-                if (DownloadedImageData)
-                {
-                    UIImage* ProcessedAnimatedImage = [self ProcessAnimatedImageData:DownloadedImageData];
+                UIImage* ProcessedAnimatedImage = DownloadedImageData ? [self ProcessAnimatedImageData:DownloadedImageData] : nil;
+
+                dispatch_async(dispatch_get_main_queue(), ^{
                     if (ProcessedAnimatedImage)
-                    {
                         self.CachedGifImage = ProcessedAnimatedImage;
-                        
-                        dispatch_async(dispatch_get_main_queue(), ^{
-                            [self CreateVisibleMenuButton:ProcessedAnimatedImage InMainView:InMainView];
-                        });
-                    }
-                }
+
+                    /* Without network access there is no logo, show a plain button so the menu can still be found. */
+                    [self CreateVisibleMenuButton:ProcessedAnimatedImage InMainView:InMainView];
+                });
             }
         });
     }
@@ -227,10 +245,24 @@ bool bIsMenuOpened = false;
         ButtonSize,
         ButtonSize
     );
-    GVisibleMenuButton.backgroundColor = [UIColor clearColor];
     GVisibleMenuButton.layer.cornerRadius = CornerRadius;
     GVisibleMenuButton.clipsToBounds = YES;
-    [GVisibleMenuButton setImage:InAnimatedImage forState:UIControlStateNormal];
+    GVisibleMenuButton.userInteractionEnabled = NO; // taps/drags are handled by the invisible button on top
+
+    if (InAnimatedImage)
+    {
+        GVisibleMenuButton.backgroundColor = [UIColor clearColor];
+        [GVisibleMenuButton setImage:InAnimatedImage forState:UIControlStateNormal];
+    }
+    else
+    {
+        GVisibleMenuButton.backgroundColor = [UIColor colorWithRed:0.1 green:0.1 blue:0.1 alpha:0.75];
+        [GVisibleMenuButton setTitle:@"D7" forState:UIControlStateNormal];
+    }
+
+    if (GInvisibleMenuButton)
+        GVisibleMenuButton.frame = GInvisibleMenuButton.frame;
+
     [GHideRecordView addSubview:GVisibleMenuButton];
 }
 
@@ -328,7 +360,8 @@ bool bIsMenuOpened = false;
         InDraggedButton.center.y + VerticalDelta
     );
     
-    const CGRect ScreenBounds = [UIApplication sharedApplication].windows[0].rootViewController.view.bounds;
+    UIView* const MainView = GetMainView();
+    const CGRect ScreenBounds = MainView ? MainView.bounds : [[UIScreen mainScreen] bounds];
     [self ClampButtonToScreenBounds:InDraggedButton WithScreenBounds:ScreenBounds];
     
     GVisibleMenuButton.center = InDraggedButton.center;

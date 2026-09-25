@@ -96,6 +96,9 @@ int32_t OffsetFinder::FindUObjectClassOffset()
 	{
 		Offset = GetValidPointerOffset<true>(ObjA, ObjB, Offset + sizeof(void*), 0x50);
 
+		if (Offset == OffsetNotFound)
+			break;
+
 		if (IsValidCyclicUClassPtrOffset(ObjA, ObjB, Offset))
 			return Offset;
 	}
@@ -269,9 +272,20 @@ void OffsetFinder::FixupHardcodedOffsets()
 		*/
 
 		const int32 OffsetToCheck = Off::FField::Owner + 0x8;
-		void* PossibleNextPtrOrBool0 = *(void**)((uint8*)ObjectArray::FindClassFast("Actor").GetChildProperties().GetAddress() + OffsetToCheck);
-		void* PossibleNextPtrOrBool1 = *(void**)((uint8*)ObjectArray::FindClassFast("ActorComponent").GetChildProperties().GetAddress() + OffsetToCheck);
-		void* PossibleNextPtrOrBool2 = *(void**)((uint8*)ObjectArray::FindClassFast("Pawn").GetChildProperties().GetAddress() + OffsetToCheck);
+
+		const void* ActorProps = ObjectArray::FindClassFast("Actor").GetChildProperties().GetAddress();
+		const void* ActorComponentProps = ObjectArray::FindClassFast("ActorComponent").GetChildProperties().GetAddress();
+		const void* PawnProps = ObjectArray::FindClassFast("Pawn").GetChildProperties().GetAddress();
+
+		if (IsBadReadRange(ActorProps, OffsetToCheck + sizeof(void*)) || IsBadReadRange(ActorComponentProps, OffsetToCheck + sizeof(void*)) || IsBadReadRange(PawnProps, OffsetToCheck + sizeof(void*)))
+		{
+			LogError("FixupHardcodedOffsets: Actor/ActorComponent/Pawn properties not found, keeping default FField offsets");
+			return;
+		}
+
+		void* PossibleNextPtrOrBool0 = *(void* const*)((const uint8*)ActorProps + OffsetToCheck);
+		void* PossibleNextPtrOrBool1 = *(void* const*)((const uint8*)ActorComponentProps + OffsetToCheck);
+		void* PossibleNextPtrOrBool2 = *(void* const*)((const uint8*)PawnProps + OffsetToCheck);
 
 		auto IsValidPtr = [](void* a) -> bool
 		{
@@ -293,7 +307,13 @@ void OffsetFinder::FixupHardcodedOffsets()
 
 void OffsetFinder::InitFNameSettings()
 {
-	UEObject FirstObject = ObjectArray::GetByIndex(0);
+	UEObject FirstObject = *ObjectArray().begin();
+
+	if (!FirstObject)
+	{
+		LogError("InitFNameSettings: no object available, keeping default FName settings");
+		return;
+	}
 
 	const uint8* NameAddress = static_cast<const uint8*>(FirstObject.GetFName().GetAddress());
 
@@ -375,8 +395,8 @@ void OffsetFinder::PostInitFNameSettings()
 
 	const int32 FNameSize = PlayerStart.FindMember("PlayerStartTag").GetSize();
 
-	/* Nothing to do for us, everything is fine! */
-	if (Off::InSDK::Name::FNameSize == FNameSize)
+	/* Nothing to do for us, everything is fine! (or nothing to verify against) */
+	if (Off::InSDK::Name::FNameSize == FNameSize || !PlayerStart || FNameSize <= 0 || FNameSize > 0x10)
 		return;
 
 	/* We've used the wrong FNameSize to determine the offset of FField::Flags. Substract the old, wrong, size and add the new one.*/
@@ -669,6 +689,14 @@ int32_t OffsetFinder::FindEnumNamesOffset()
 		UEnumNumValuesOffset = FindOffset(Infos);
 	}
 
+	if (!Infos[0].first || UEnumNumValuesOffset == OffsetNotFound)
+	{
+		/* UEnum : UField { FString CppType; TArray<TPair<FName, int64>> Names; ... } */
+		const int32 DefaultNamesOffset = Off::UField::Next + static_cast<int32>(sizeof(void*)) + 0x10;
+		LogError("FindEnumNamesOffset: reference enums not found, assuming UEnum::Names at 0x%X", DefaultNamesOffset);
+		return DefaultNamesOffset;
+	}
+
 	InializeUEnumSettings(Infos[0].first, UEnumNumValuesOffset);
 
 	return UEnumNumValuesOffset - sizeof(void*);
@@ -827,6 +855,13 @@ int32_t OffsetFinder::FindFunctionNativeFuncOffset()
 	if (SwitchLevel_Or_FOV == 0)
 		SwitchLevel_Or_FOV = reinterpret_cast<uintptr_t>(ObjectArray::FindObjectFast("FOV", EClassCastFlags::Function).GetAddress());
 
+	if (!WasInputKeyJustPressed || !ToggleSpeaking || !SwitchLevel_Or_FOV
+		|| IsBadReadRange(reinterpret_cast<void*>(WasInputKeyJustPressed), 0x140) || IsBadReadRange(reinterpret_cast<void*>(ToggleSpeaking), 0x140) || IsBadReadRange(reinterpret_cast<void*>(SwitchLevel_Or_FOV), 0x140))
+	{
+		LogError("FindFunctionNativeFuncOffset: reference functions not found");
+		return 0x0;
+	}
+
 	for (int i = 0x30; i < 0x140; i += sizeof(void*))
 	{
 		if (Platform::IsAddressInProcessRange(*reinterpret_cast<uintptr_t*>(WasInputKeyJustPressed + i)) &&
@@ -864,7 +899,12 @@ int32_t OffsetFinder::FindImplementedInterfacesOffset()
 
 	const uint8_t* ActorComponentClassPtr = reinterpret_cast<const uint8_t*>(ObjectArray::FindClassFast("ActorComponent").GetAddress());
 
-	for (int i = Off::UClass::ClassDefaultObject; i <= (0x350 - 0x10); i += sizeof(void*))
+	if (!Interface_AssetUserDataClass || !ActorComponentClassPtr || Off::UClass::ClassDefaultObject <= 0)
+		return OffsetNotFound;
+
+	const int32_t LastOffset = GetReadableEnd(ActorComponentClassPtr, Off::UClass::ClassDefaultObject, 0x350) - 0x10;
+
+	for (int i = Off::UClass::ClassDefaultObject; i <= LastOffset; i += sizeof(void*))
 	{
 		const auto& ActorArray = *reinterpret_cast<const TArray<FImplementedInterface>*>(ActorComponentClassPtr + i);
 

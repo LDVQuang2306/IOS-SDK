@@ -25,6 +25,9 @@ private:
 	static inline uint32 SizeOfFUObjectItem = 0x18;
 	static inline uint32 FUObjectItemInitialOffset = 0x0;
 
+	/* Offset of UObjectBase::InternalIndex, detected together with the FUObjectItem layout and used to validate GObjects. -1 if unknown. */
+	static inline int32 ObjectIndexOffset = 0xC;
+
 public:
 	static inline std::string DecryptionLambdaStr;
 
@@ -37,13 +40,20 @@ private:
 	static void InitializeFUObjectItem(uint8_t* FirstItemPtr);
 	static void InitializeChunkSize(uint8_t* GObjects);
 
+	/* Commits a candidate GUObjectArray (layout already stored in Off::FUObjectArray) and verifies that the objects it yields are real UObjects. */
+	static bool CommitAndValidate(uint8_t* Address, uintptr_t ImageBase, bool bIsChunked, int32 ElementsPerChunk, bool bDetectItemLayout);
+	static bool ValidateObjects();
+
 public:
 	static void InitDecryption(uint8_t* (*DecryptionFunction)(void* ObjPtr), const char* DecryptionLambdaAsStr);
 
-	static void Init(bool bScanAllMemory = false, const char* const ModuleName = nullptr);
+	/* All Init functions return false instead of terminating the game when GObjects can't be found/used. */
+	static bool Init(bool bScanAllMemory = false, const char* const ModuleName = nullptr);
 
-	static void Init(int32 GObjectsOffset, const FFixedUObjectArrayLayout& ObjectArrayLayout = FFixedUObjectArrayLayout(), const char* const ModuleName = nullptr);
-	static void Init(int32 GObjectsOffset, int32 ElementsPerChunk, const FChunkedFixedUObjectArrayLayout& ObjectArrayLayout = FChunkedFixedUObjectArrayLayout(), const char* const ModuleName = nullptr);
+	static bool Init(int32 GObjectsOffset, const FFixedUObjectArrayLayout& ObjectArrayLayout = FFixedUObjectArrayLayout(), const char* const ModuleName = nullptr);
+	static bool Init(int32 GObjectsOffset, int32 ElementsPerChunk, const FChunkedFixedUObjectArrayLayout& ObjectArrayLayout = FChunkedFixedUObjectArrayLayout(), const char* const ModuleName = nullptr);
+
+	static inline bool IsInitialized() { return GObjects != nullptr && ByIndex != nullptr; }
 
 	static void DumpObjects(const fs::path& Path, bool bWithPathname = false);
 	static void DumpObjectsWithProperties(const fs::path& Path, bool bWithPathname = false);
@@ -126,8 +136,8 @@ public:
 	UEProperty operator*() const;
 
 private:
-	inline void IterateToNextStruct();
-	inline void IterateToNextStructWithMembers();
+	void IterateToNextStruct();
+	void IterateToNextStructWithMembers();
 
 private:
 	inline bool CurrenStructHasMoreMembers() const { return (static_cast<size_t>(PropertyIndex) + 1) < Fields.size(); }

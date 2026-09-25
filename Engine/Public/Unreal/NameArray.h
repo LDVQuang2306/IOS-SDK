@@ -11,12 +11,16 @@ private:
 	static constexpr int32 NameWideMask = 0x1;
 
 private:
-	static inline int32 FNameEntryLengthShiftCount = 0x0;
+	/* Right-shift that yields FNameEntryHeader::Len (6 for regular builds, 1 for case-preserving names). Detected, not assumed. */
+	static inline int32 FNameEntryLengthShiftCount = 0x6;
+
+	/* sizeof(WIDECHAR) inside the game. Can differ from the dumper's TCHAR, wide names are converted. */
+	static inline int32 GameWideCharSize = 0x2;
 
 	static inline UnrealString(*GetStr)(uint8* NameEntry) = nullptr;
 
 private:
-	uint8* Address;
+	uint8* Address = nullptr;
 
 public:
 	FNameEntry() = default;
@@ -29,8 +33,8 @@ public:
 	void* GetAddress();
 
 private:
-	//Optional to avoid code duplication for FNamePool
-	static void Init(const uint8_t* FirstChunkPtr = nullptr, int64 NameEntryStringOffset = 0x0);
+	/* Installs the entry reader for the current mode (FNamePool / TNameEntryArray). Returns false if the entry layout couldn't be determined. */
+	static bool Init(const uint8_t* FirstChunkPtr = nullptr, int64 NameEntryStringOffset = 0x0);
 };
 
 class NameArray
@@ -44,9 +48,18 @@ private:
 
 	static inline void* (*ByIndex)(void* NamesArray, int32 ComparisonIndex, int32 NamePoolBlockOffsetBits) = nullptr;
 
+	/* Whether every Blocks[0 ... FNameMaxBlocks - 1] slot is readable, so name lookups don't need a syscall per access. */
+	static inline bool bAllBlockSlotsReadable = false;
+
+	/* Number of FNamePool blocks verified so far. Blocks are allocated in order, higher indices are verified on first use. */
+	static inline int32 NumKnownBlocks = 0;
+
 private:
 	static bool InitializeNameArray(uint8_t* NameArray);
 	static bool InitializeNamePool(uint8_t* NamePool);
+
+	/* Commits an FNamePool whose Blocks[] array starts at BlocksSlot. Offsets of the other members are derived from the data. */
+	static bool InitializeNamePoolFromBlocks(uint8_t* BlocksSlot, uintptr_t SearchLowerBound, uintptr_t ImageBase, uint8_t* ForcedPoolBase = nullptr);
 
 public:
 	/* (1) Per-FNameEntry content decryption (default: identity).
@@ -123,9 +136,27 @@ public:
 	static void InitPoolDecryption(uintptr_t (*DecryptionFunction)(uintptr_t EncryptedNamePoolData), const char* DecryptionLambdaAsStr);
 
 public:
+	/* Whether the name-string decryption was installed by the user (then it's never replaced by auto-detection). */
+	static inline bool bHasUserStringDecryption = false;
+
+	/* Delta Force: FNameEntry characters are XOR'd with a key derived from the name length (header stays plaintext). */
+	static std::string DecryptDeltaForceNameString(std::string Decoded);
+	static const char* const DeltaForceNameStringDecryptionSrc;
+
+public:
 	/* Should be changed later and combined */
 	static bool TryFindNameArray();
 	static bool TryFindNamePool();
+
+	/*
+	* Data-anchored searches: walk the writable segments of the image for the name table itself. FNamePool::Blocks[0] (and
+	* TNameEntryArray chunk 0) always start with the "None" and "ByteProperty" entries. Delta Force's encrypted name strings
+	* are recognized automatically. These don't depend on code patterns, so they survive game updates.
+	*/
+	static bool TryFindNamePoolByData(const char* const ModuleName = nullptr);
+	static bool TryFindNameArrayByData(const char* const ModuleName = nullptr);
+
+	static inline bool IsInitialized() { return GNames != nullptr && ByIndex != nullptr && FNameEntry::GetStr != nullptr; }
 
 	static bool TryInit(bool bIsTestOnly = false);
 	static bool TryInit(int32 OffsetOverride, bool bIsNamePool, const char* const ModuleName = nullptr);

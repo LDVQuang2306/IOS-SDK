@@ -328,20 +328,18 @@ namespace UC
 	public:
 		inline std::string ToString() const
 		{
-			if (*this)
-			{
-                UnrealString Str(Data);
-                return std::string(Str.begin(), Str.end());
-			}
-			return "";
+			const UnrealString Str = ToWString();
+			return std::string(Str.begin(), Str.end());
 		}
 
+		/* Bounded by NumElements, strings coming from the engine aren't guaranteed to be null-terminated. */
 		inline UnrealString ToWString() const
 		{
-			if (*this)
-				return UnrealString(Data);
+			if (!*this)
+				return TEXT("");
 
-			return TEXT("");
+			const size_t Length = std::char_traits<TCHAR>::find(Data, NumElements, TCHAR(0)) ? std::char_traits<TCHAR>::find(Data, NumElements, TCHAR(0)) - Data : NumElements;
+			return UnrealString(Data, Length);
 		}
 
 	public:

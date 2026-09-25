@@ -41,7 +41,10 @@ namespace Off
 			inline int32 PEIndex;
 			inline int32 PEOffset;
 
-				void InitPE();
+			/* Set once PEIndex was found by the scorer with enough confidence (or set manually) and points to a function in the image. */
+			inline bool bIsValid = false;
+
+			void InitPE();
 			void InitPE(const int32 Index, const char* const ModuleName = Settings::General::DefaultModuleName);
 		}
 

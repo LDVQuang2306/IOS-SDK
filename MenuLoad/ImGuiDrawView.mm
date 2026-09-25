@@ -52,9 +52,9 @@ static bool MenDeal = true;
 
 - (void)loadView
 {
-    CGFloat w = [UIApplication sharedApplication].windows[0].rootViewController.view.frame.size.width;
-    CGFloat h = [UIApplication sharedApplication].windows[0].rootViewController.view.frame.size.height;
-    self.view = [[MTKView alloc] initWithFrame:CGRectMake(0, 0, w, h)];
+    UIView* const MainView = GetMainView();
+    const CGRect Frame = MainView ? MainView.frame : [[UIScreen mainScreen] bounds];
+    self.view = [[MTKView alloc] initWithFrame:CGRectMake(0, 0, Frame.size.width, Frame.size.height)];
 }
 
 - (void)viewDidLoad {

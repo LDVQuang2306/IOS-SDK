@@ -17,6 +17,8 @@
 #include "Menu/Logger.h"
 void Off::InSDK::ProcessEvent::InitPE()
 {
+	Off::InSDK::ProcessEvent::bIsValid = false;
+
 	UEObject FirstObj = ObjectArray::GetByIndex(0);
 	if (!FirstObj.GetAddress())
 	{
@@ -31,7 +33,8 @@ void Off::InSDK::ProcessEvent::InitPE()
 		return;
 	}
 
-	const int32_t FoundIdx = Architecture_x86_64::FindProcessEventIndex(Vft);
+	int32_t Score = 0;
+	const int32_t FoundIdx = Architecture_x86_64::FindProcessEventIndex(Vft, &Score);
 	const void*   FoundPtr = (FoundIdx >= 0) ? Vft[FoundIdx] : nullptr;
 
 	if (!FoundPtr || FoundIdx < 0)
@@ -43,17 +46,33 @@ void Off::InSDK::ProcessEvent::InitPE()
 	Off::InSDK::ProcessEvent::PEIndex  = FoundIdx;
 	Off::InSDK::ProcessEvent::PEOffset = Platform::GetOffset(FoundPtr);
 
-	LogInfo("PE-Index (auto): 0x%X", FoundIdx);
+	/* UObject::ProcessEvent matches (almost) all 7 fingerprints, any other virtual function only one or two. */
+	constexpr int32_t MinRequiredScore = 4;
+	Off::InSDK::ProcessEvent::bIsValid = Score >= MinRequiredScore;
+
+	LogInfo("PE-Index (auto): 0x%X (score %d/7)", FoundIdx, Score);
 	LogInfo("PE-Offset: 0x%X", Off::InSDK::ProcessEvent::PEOffset);
+
+	if (!Off::InSDK::ProcessEvent::bIsValid)
+		LogError("InitPE: low confidence, ProcessEvent won't be called by the dumper. Use Off::InSDK::ProcessEvent::InitPE(Index) if you know the index.");
 }
 
 void Off::InSDK::ProcessEvent::InitPE(const int32 Index, const char* const ModuleName)
 {
+	Off::InSDK::ProcessEvent::bIsValid = false;
 	Off::InSDK::ProcessEvent::PEIndex = Index;
 
-	void** VFT = *reinterpret_cast<void***>(ObjectArray::GetByIndex(0).GetAddress());
+	UEObject FirstObj = ObjectArray::GetByIndex(0);
+	void** VFT = FirstObj ? *reinterpret_cast<void***>(FirstObj.GetAddress()) : nullptr;
+
+	if (Index <= 0 || !VFT || IsBadReadPtr(&VFT[Index]) || !IsInProcessRange(reinterpret_cast<uintptr_t>(VFT[Index])))
+	{
+		LogError("PE-Index (manual) 0x%X is invalid for this game", Index);
+		return;
+	}
 
 	Off::InSDK::ProcessEvent::PEOffset = Platform::GetOffset(VFT[Off::InSDK::ProcessEvent::PEIndex], ModuleName);
+	Off::InSDK::ProcessEvent::bIsValid = true;
 
 	LogInfo("PE-Index (manual): 0x%X", Index);
 	LogInfo("PE-Offset: 0x%X", Off::InSDK::ProcessEvent::PEOffset);
@@ -131,9 +150,9 @@ void Off::InSDK::Text::InitTextOffsets()
 {
 	LogInfo("InitTextOffsets: probing FText layout via Conv_StringToText...");
 
-	if (!Off::InSDK::ProcessEvent::PEIndex)
+	if (!Off::InSDK::ProcessEvent::bIsValid)
 	{
-		LogError("InitTextOffsets: called before ProcessEvent was initialized (PEIndex == 0)");
+		LogError("InitTextOffsets: ProcessEvent is not validated, skipping FText probing (FText helpers in the SDK use default offsets)");
 		return;
 	}
 
@@ -167,11 +186,24 @@ void Off::InSDK::Text::InitTextOffsets()
 		}
 	}
 
+	if (!ReturnProp || !InStringProp)
+	{
+		LogError("InitTextOffsets: Conv_StringToText parameters not found");
+		return;
+	}
+
 	const int32 ParamSize = Conv_StringToText.GetStructSize();
 	const int32 FTextSize = ReturnProp.GetSize();
 
 	const int32 StringOffset = InStringProp.GetOffset();
 	const int32 ReturnValueOffset = ReturnProp.GetOffset();
+
+	if (ParamSize <= 0 || ParamSize > 0x1000 || FTextSize < static_cast<int32>(sizeof(void*)) || StringOffset < 0 || ReturnValueOffset < 0
+		|| (StringOffset + static_cast<int32>(sizeof(FString))) > ParamSize || (ReturnValueOffset + FTextSize) > ParamSize)
+	{
+		LogError("InitTextOffsets: implausible Conv_StringToText layout (ParamSize 0x%X, FText 0x%X)", ParamSize, FTextSize);
+		return;
+	}
 
 	Off::InSDK::Text::TextSize = FTextSize;
 
@@ -190,12 +222,16 @@ void Off::InSDK::Text::InitTextOffsets()
 	*reinterpret_cast<FString*>(ParamPtr + StringOffset) = StringText;
 
 	/* This function is 'static' so the object on which we call it doesn't matter */
-	ObjectArray::GetByIndex(0).ProcessEvent(Conv_StringToText, ParamPtr);
+	if (!ObjectArray::GetByIndex(0).ProcessEvent(Conv_StringToText, ParamPtr))
+	{
+		LogError("InitTextOffsets: ProcessEvent call was skipped");
+		return;
+	}
 
 	uint8_t* FTextDataPtr = nullptr;
 
 	/* Search for the first valid pointer inside of the FText and make the offset our 'TextDatOffset' */
-	for (int32 i = 0; i < (FTextSize - sizeof(void*)); i += sizeof(void*))
+	for (int32 i = 0; i <= (FTextSize - static_cast<int32>(sizeof(void*))); i += sizeof(void*))
 	{
 		void* PossibleTextDataPtr = *reinterpret_cast<void**>(ParamPtr + ReturnValueOffset + i);
 
@@ -217,6 +253,12 @@ void Off::InSDK::Text::InitTextOffsets()
 	constexpr int32 StartOffset = sizeof(void*); // FString::NumElements offset
 
 	/* Search for a pointer pointing to a int32 Value (FString::NumElements) equal to StringLength */
+	if (IsBadReadRange(FTextDataPtr, MaxOffset))
+	{
+		LogError("InitTextOffsets: FTextData isn't readable");
+		return;
+	}
+
 	for (int32 i = StartOffset; i < MaxOffset; i += sizeof(int32))
 	{
 		TCHAR* PosibleStringPtr = *reinterpret_cast<TCHAR**>((FTextDataPtr + i) - sizeof(void*));

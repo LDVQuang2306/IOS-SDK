@@ -25,6 +25,9 @@ EFieldClassID UEFFieldClass::GetId() const
 
 EClassCastFlags UEFFieldClass::GetCastFlags() const
 {
+	if (!Class)
+		return EClassCastFlags::None;
+
 	return *reinterpret_cast<EClassCastFlags*>(Class + Off::FFieldClass::CastFlags);
 }
 
@@ -35,6 +38,9 @@ EClassFlags UEFFieldClass::GetClassFlags() const
 
 UEFFieldClass UEFFieldClass::GetSuper() const
 {
+	if (!Class)
+		return UEFFieldClass(nullptr);
+
 	return UEFFieldClass(*reinterpret_cast<void**>(Class + Off::FFieldClass::SuperClass));
 }
 
@@ -76,6 +82,9 @@ const void* UEFField::GetAddress() const
 
 EObjectFlags UEFField::GetFlags() const
 {
+	if (!Field)
+		return EObjectFlags::NoFlags;
+
 	return *reinterpret_cast<EObjectFlags*>(Field + Off::FField::Flags);
 }
 
@@ -114,6 +123,9 @@ class UEObject UEFField::GetOwnerUObject() const
 
 UEFFieldClass UEFField::GetClass() const
 {
+	if (!Field)
+		return UEFFieldClass(nullptr);
+
 	return UEFFieldClass(*reinterpret_cast<void**>(Field + Off::FField::Class));
 }
 
@@ -124,6 +136,9 @@ FName UEFField::GetFName() const
 
 UEFField UEFField::GetNext() const
 {
+	if (!Field)
+		return UEFField(nullptr);
+
 	return UEFField(*reinterpret_cast<void**>(Field + Off::FField::Next));
 }
 
@@ -227,7 +242,8 @@ std::string UEFField::GetCppName() const
 
 UEFField::operator bool() const
 {
-	return Field != nullptr && reinterpret_cast<void*>(Field + Off::FField::Class) != nullptr;
+	/* A field without an FFieldClass is not a (fully constructed) field */
+	return Field != nullptr && *reinterpret_cast<void* const*>(Field + Off::FField::Class) != nullptr;
 }
 
 bool UEFField::operator==(const UEFField& Other) const
@@ -254,21 +270,33 @@ const void* UEObject::GetAddress() const
 
 void* UEObject::GetVft() const
 {
+	if (!Object)
+		return nullptr;
+
 	return *reinterpret_cast<void**>(Object);
 }
 
 EObjectFlags UEObject::GetFlags() const
 {
+	if (!Object)
+		return EObjectFlags::NoFlags;
+
 	return *reinterpret_cast<EObjectFlags*>(Object + Off::UObject::Flags);
 }
 
 int32 UEObject::GetIndex() const
 {
+	if (!Object)
+		return -1;
+
 	return *reinterpret_cast<int32*>(Object + Off::UObject::Index);
 }
 
 UEClass UEObject::GetClass() const
 {
+	if (!Object)
+		return UEClass(nullptr);
+
 	return UEClass(*reinterpret_cast<void**>(Object + Off::UObject::Class));
 }
 
@@ -279,6 +307,9 @@ FName UEObject::GetFName() const
 
 UEObject UEObject::GetOuter() const
 {
+	if (!Object)
+		return UEObject(nullptr);
+
 	return UEObject(*reinterpret_cast<void**>(Object + Off::UObject::Outer));
 }
 
@@ -442,8 +473,8 @@ std::string UEObject::GetPathName() const
 
 UEObject::operator bool() const
 {
-	// if an object is 0x10000F000 it passes the nullptr check
-	return Object != nullptr && reinterpret_cast<void*>(Object + Off::UObject::Class) != nullptr;
+	/* An object without a class is being constructed or destroyed right now, treat it as invalid. */
+	return Object != nullptr && *reinterpret_cast<void* const*>(Object + Off::UObject::Class) != nullptr;
 }
 
 UEObject::operator uint8* ()
@@ -461,17 +492,39 @@ bool UEObject::operator!=(const UEObject& Other) const
 	return Object != Other.Object;
 }
 
-void UEObject::ProcessEvent(UEFunction Func, void* Params)
+bool UEObject::ProcessEvent(UEFunction Func, void* Params)
 {
+	if (!Settings::Config::bCallProcessEvent)
+		return false;
+
+	/* Calling a wrong vtable slot with (UFunction*, void*) crashes the game, so only call a validated ProcessEvent. */
+	if (!Off::InSDK::ProcessEvent::bIsValid || Off::InSDK::ProcessEvent::PEIndex <= 0)
+	{
+		LogError("ProcessEvent was not found/validated, skipping call of '%s'", Func.GetName().c_str());
+		return false;
+	}
+
+	if (!Object || !Func)
+		return false;
+
 	void** VFT = *reinterpret_cast<void***>(GetAddress());
+	if (!VFT || IsBadReadPtr(&VFT[Off::InSDK::ProcessEvent::PEIndex]))
+		return false;
 
 	void(*Prd)(void*, void*, void*) = decltype(Prd)(VFT[Off::InSDK::ProcessEvent::PEIndex]);
 
+	if (!IsInProcessRange(reinterpret_cast<uintptr_t>(Prd)))
+		return false;
+
 	Prd(Object, Func.GetAddress(), Params);
+	return true;
 }
 
 UEField UEField::GetNext() const
 {
+	if (!Object)
+		return UEField(nullptr);
+
 	return UEField(*reinterpret_cast<void**>(Object + Off::UField::Next));
 }
 
@@ -619,16 +672,25 @@ std::string UEEnum::GetEnumTypeAsStr() const
 
 UEStruct UEStruct::GetSuper() const
 {
+	if (!Object)
+		return UEStruct(nullptr);
+
 	return UEStruct(*reinterpret_cast<void**>(Object + Off::UStruct::SuperStruct));
 }
 
 UEField UEStruct::GetChild() const
 {
+	if (!Object)
+		return UEField(nullptr);
+
 	return UEField(*reinterpret_cast<void**>(Object + Off::UStruct::Children));
 }
 
 UEFField UEStruct::GetChildProperties() const
 {
+	if (!Object)
+		return UEFField(nullptr);
+
 	return UEFField(*reinterpret_cast<void**>(Object + Off::UStruct::ChildProperties));
 }
 
@@ -639,6 +701,9 @@ int16 UEStruct::GetMinAlignment() const
 
 int32 UEStruct::GetStructSize() const
 {
+	if (!Object)
+		return 0;
+
 	return *reinterpret_cast<int32*>(Object + Off::UStruct::Size);
 }
 
@@ -746,6 +811,9 @@ bool UEStruct::HasMembers() const
 
 EClassCastFlags UEClass::GetCastFlags() const
 {
+	if (!Object)
+		return EClassCastFlags::None;
+
 	return *reinterpret_cast<EClassCastFlags*>(Object + Off::UClass::CastFlags);
 }
 
@@ -761,6 +829,9 @@ bool UEClass::IsType(EClassCastFlags TypeFlag) const
 
 UEObject UEClass::GetDefaultObject() const
 {
+	if (!Object)
+		return UEObject(nullptr);
+
 	return UEObject(*reinterpret_cast<void**>(Object + Off::UClass::ClassDefaultObject));
 }
 
@@ -791,6 +862,9 @@ UEFunction UEClass::GetFunction(const std::string& ClassName, const std::string&
 
 EFunctionFlags UEFunction::GetFunctionFlags() const
 {
+	if (!Object)
+		return EFunctionFlags::None;
+
 	return *reinterpret_cast<EFunctionFlags*>(Object + Off::UFunction::FunctionFlags);
 }
 
@@ -877,6 +951,9 @@ FName UEProperty::GetFName() const
 
 int32 UEProperty::GetArrayDim() const
 {
+	if (!Base)
+		return 0;
+
 	if (Settings::Internal::bUseUint8ArrayDim)
 		return *reinterpret_cast<uint8*>(Base + Off::Property::ArrayDim);
 
@@ -885,16 +962,25 @@ int32 UEProperty::GetArrayDim() const
 
 int32 UEProperty::GetSize() const
 {
+	if (!Base)
+		return 0;
+
 	return *reinterpret_cast<int32*>(Base + Off::Property::ElementSize);
 }
 
 int32 UEProperty::GetOffset() const
 {
+	if (!Base)
+		return -1;
+
 	return *reinterpret_cast<int32*>(Base + Off::Property::Offset_Internal);
 }
 
 EPropertyFlags UEProperty::GetPropertyFlags() const
 {
+	if (!Base)
+		return EPropertyFlags::None;
+
 	return *reinterpret_cast<EPropertyFlags*>(Base + Off::Property::PropertyFlags);
 }
 

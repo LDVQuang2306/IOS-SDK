@@ -54,7 +54,8 @@ namespace Settings
 		/* This option determines whether calls to FindByStringInAllSections should only search executable sections, or all sections. */
 		constexpr bool bSearchOnlyExecutableSectionsForStrings = true;
 
-		/* If the target module is not the main executable, specify it here (iOS: the Mach-O image name, e.g. "DeltaForceClient") */
+		/* If the target module is not the main executable, specify it here (iOS: the Mach-O image name, e.g. "DeltaForceClient").
+		 * nullptr = main executable, which is where Unreal Engine code lives in iOS builds (Delta Force included). */
 		constexpr const char* DefaultModuleName = nullptr;
 	}
 
@@ -65,6 +66,10 @@ namespace Settings
 		inline int SleepTimeout = 0;
 		inline int DumpKey = 0;
 		inline std::string SDKNamespaceName = "SDK";
+
+		/* The dumper calls UObject::ProcessEvent (only if it was found with high confidence) to probe the FText layout and to log the
+		 * engine version. Set to false if a game doesn't tolerate that; the SDK is generated either way. */
+		inline bool bCallProcessEvent = true;
 
 		void Load();
 		void DelayDumperStart();

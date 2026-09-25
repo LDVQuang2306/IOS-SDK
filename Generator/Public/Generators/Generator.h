@@ -48,7 +48,8 @@ private:
 	static inline bool bDumepdEditorOnlyMetadata = false;
 
 public:
-    static void InitEngineCore();
+    /* Returns false (without having touched the game) if the engine core couldn't be located. */
+    static bool InitEngineCore();
     static void InitInternal();
 
 private:

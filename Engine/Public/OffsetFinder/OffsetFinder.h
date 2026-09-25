@@ -13,6 +13,26 @@ namespace OffsetFinder
 	constexpr int32 OffsetNotFound = -1;
 	constexpr int32 OffsetFinderMinValue = Platform::Is32Bit() ? 0x18 : 0x28;
 
+	/* Largest End <= RequestedEnd such that [Base + Start, Base + End) is readable (checked page by page). */
+	inline int32_t GetReadableEnd(const void* Base, int32_t Start, int32_t RequestedEnd)
+	{
+		if (!Base || RequestedEnd <= Start)
+			return Start;
+
+		constexpr uintptr_t PageSize = 0x1000;
+
+		const uintptr_t First = reinterpret_cast<uintptr_t>(Base) + Start;
+		const uintptr_t Last = reinterpret_cast<uintptr_t>(Base) + RequestedEnd - 1;
+
+		for (uintptr_t Page = First & ~(PageSize - 1); Page <= Last; Page += PageSize)
+		{
+			if (Platform::IsBadReadPtr(Page < First ? First : Page))
+				return static_cast<int32_t>((Page < First ? First : Page) - reinterpret_cast<uintptr_t>(Base));
+		}
+
+		return RequestedEnd;
+	}
+
 	template<int Alignement = 4, typename T>
 	inline int32_t FindOffset(const std::vector<std::pair<void*, T>>& ObjectValuePair, int MinOffset = OffsetFinderMinValue, int MaxOffset = 0x1A0)
 	{
@@ -27,7 +47,10 @@ namespace OffsetFinder
 				continue;
 			}
 
-			for (int j = HighestFoundOffset; j < MaxOffset; j += Alignement)
+			/* Small objects can end right before an unmapped page, never read past readable memory. */
+			const int32_t ReadableEnd = GetReadableEnd(ObjectValuePair[i].first, HighestFoundOffset, MaxOffset + static_cast<int32_t>(sizeof(T))) - static_cast<int32_t>(sizeof(T));
+
+			for (int j = HighestFoundOffset; j < MaxOffset && j <= ReadableEnd; j += Alignement)
 			{
 				const T TypedValueAtOffset = *reinterpret_cast<T*>(static_cast<uint8_t*>(ObjectValuePair[i].first) + j);
 
@@ -38,7 +61,7 @@ namespace OffsetFinder
 					if (j > HighestFoundOffset)
 					{
 						HighestFoundOffset = j;
-						i = 0;
+						i = -1; // restart with the first pair at the new offset
 					}
 					j = MaxOffset;
 				}
@@ -55,10 +78,14 @@ namespace OffsetFinder
 		const uint8_t* ObjA = static_cast<const uint8_t*>(PtrObjA);
 		const uint8_t* ObjB = static_cast<const uint8_t*>(PtrObjB);
 
-		if (Platform::IsBadReadPtr(ObjA) || Platform::IsBadReadPtr(ObjB))
+		if (StartingOffset < 0 || Platform::IsBadReadPtr(ObjA) || Platform::IsBadReadPtr(ObjB))
 			return OffsetNotFound;
 
-		for (int j = StartingOffset; j <= MaxOffset; j += sizeof(void*))
+		const int32_t ReadableEndA = GetReadableEnd(ObjA, StartingOffset, MaxOffset + static_cast<int32_t>(sizeof(void*)));
+		const int32_t ReadableEndB = GetReadableEnd(ObjB, StartingOffset, MaxOffset + static_cast<int32_t>(sizeof(void*)));
+		const int32_t LastOffset = std::min(ReadableEndA, ReadableEndB) - static_cast<int32_t>(sizeof(void*));
+
+		for (int j = StartingOffset; j <= MaxOffset && j <= LastOffset; j += sizeof(void*))
 		{
 			const bool bIsAValid = !Platform::IsBadReadPtr(*reinterpret_cast<void* const*>(ObjA + j)) && (bCheckForVft ? !Platform::IsBadReadPtr(**reinterpret_cast<void** const*>(ObjA + j)) : true);
 			const bool bIsBValid = !Platform::IsBadReadPtr(*reinterpret_cast<void* const*>(ObjB + j)) && (bCheckForVft ? !Platform::IsBadReadPtr(**reinterpret_cast<void** const*>(ObjB + j)) : true);

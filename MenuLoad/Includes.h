@@ -43,6 +43,50 @@
 #include "MenuLoad.h"
 
 
+/* The game's key window. '[UIApplication sharedApplication].windows[0]' throws (crashes the game) while no window exists yet. */
+inline UIWindow* GetMainWindow()
+{
+    UIApplication* const App = [UIApplication sharedApplication];
+    UIWindow* FallbackWindow = nil;
+
+    if (@available(iOS 13.0, *))
+    {
+        for (UIScene* Scene in App.connectedScenes)
+        {
+            if (![Scene isKindOfClass:[UIWindowScene class]])
+                continue;
+
+            for (UIWindow* Window in ((UIWindowScene*)Scene).windows)
+            {
+                if (Window.isKeyWindow)
+                    return Window;
+
+                if (!FallbackWindow)
+                    FallbackWindow = Window;
+            }
+        }
+    }
+
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    if (!FallbackWindow)
+        FallbackWindow = App.keyWindow;
+#pragma clang diagnostic pop
+
+    return FallbackWindow ? FallbackWindow : App.windows.firstObject;
+}
+
+/* Root view of the game's window, or the window itself. nil while the game hasn't created its window yet. */
+inline UIView* GetMainView()
+{
+    UIWindow* const Window = GetMainWindow();
+
+    if (!Window)
+        return nil;
+
+    return Window.rootViewController.view ? Window.rootViewController.view : Window;
+}
+
 inline UIButton* GInvisibleMenuButton = nullptr;
 inline UIButton* GVisibleMenuButton = nullptr;
 inline MenuInteraction* GMenuTouchView = nullptr;

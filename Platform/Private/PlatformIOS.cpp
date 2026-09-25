@@ -88,28 +88,22 @@ namespace Platform
     {
         if (!Callback) return nullptr;
 
-        const auto [ImageBase, ImageSize, Header, Slide] = ::GetImageBaseAndSize(ModuleName);
-        if (!Header) return nullptr;
-
         if (Granularity == 0) Granularity = 0x4;
 
-        uintptr_t CommandPtr = reinterpret_cast<uintptr_t>(Header + 1);
-        for (uint32_t i = 0; i < Header->ncmds; ++i)
+        /* Only mapped segments: __PAGEZERO spans 4GB of unmapped memory and must never be walked. */
+        for (const MachSegmentInfo& Seg : ::GetImageSegments(ModuleName))
         {
-            const auto* LC = reinterpret_cast<const struct load_command*>(CommandPtr);
-            if (LC->cmd == LC_SEGMENT_64)
-            {
-                const auto* Seg = reinterpret_cast<const struct segment_command_64*>(LC);
-                const uintptr_t Start = Seg->vmaddr + Slide;
-                const uintptr_t End = Start + Seg->vmsize - OffsetFromEnd;
+            if (Seg.Size <= OffsetFromEnd)
+                continue;
 
-                for (uintptr_t Addr = Start; Addr + Granularity <= End; Addr += Granularity)
-                {
-                    void* P = reinterpret_cast<void*>(Addr);
-                    if (Callback(P)) return P;
-                }
+            const uintptr_t Start = Seg.Start;
+            const uintptr_t End = Start + Seg.Size - OffsetFromEnd;
+
+            for (uintptr_t Addr = Start; Addr + Granularity <= End; Addr += Granularity)
+            {
+                void* P = reinterpret_cast<void*>(Addr);
+                if (Callback(P)) return P;
             }
-            CommandPtr += LC->cmdsize;
         }
         return nullptr;
     }
@@ -230,28 +224,25 @@ void* PlatformPrivateImplHelper::FindAlignedValueInSectionImpl(const SectionInfo
 
 void* PlatformPrivateImplHelper::FindAlignedValueInAllSectionsImpl(const void* ValuePtr, ValueCompareFuncType ComparisonFunction, const int32_t ValueTypeSize, const int32_t Alignment, const uintptr_t StartAddress, int32_t Range, const char* const ModuleName)
 {
-    const auto [ImageBase, ImageSize, Header, Slide] = ::GetImageBaseAndSize(ModuleName);
-    if (!Header) return nullptr;
-
-    uintptr_t CommandPtr = reinterpret_cast<uintptr_t>(Header + 1);
-    for (uint32_t i = 0; i < Header->ncmds; ++i)
+    /* Globals (GWorld, GUObjectArray, ...) only live in writable segments; __TEXT/__LINKEDIT can't hold them and __PAGEZERO isn't mapped. */
+    for (const MachSegmentInfo& Seg : ::GetWritableImageSegments(ModuleName))
     {
-        const auto* LC = reinterpret_cast<const struct load_command*>(CommandPtr);
-        if (LC->cmd == LC_SEGMENT_64)
-        {
-            const auto* Seg = reinterpret_cast<const struct segment_command_64*>(LC);
-            const uintptr_t SegStart = Seg->vmaddr + Slide;
-            const uintptr_t SegEnd = SegStart + Seg->vmsize;
+        const uintptr_t SegStart = Seg.Start;
+        const uintptr_t SegEnd = SegStart + Seg.Size;
 
-            uintptr_t Start = StartAddress > SegStart ? StartAddress : SegStart;
-            uintptr_t End = Range > 0 ? std::min<uintptr_t>(SegEnd, Start + Range) : SegEnd;
-            if (Start < End)
-            {
-                if (void* Found = FinAlignedValueInRangeImpl(ValuePtr, ComparisonFunction, ValueTypeSize, Alignment, Start, static_cast<uint32_t>(End - Start)))
-                    return Found;
-            }
+        const uintptr_t Start = StartAddress > SegStart ? StartAddress : SegStart;
+        const uintptr_t End = Range > 0 ? std::min<uintptr_t>(SegEnd, Start + Range) : SegEnd;
+
+        /* FinAlignedValueInRangeImpl takes a 32-bit range, walk huge segments in pieces. */
+        for (uintptr_t ChunkStart = Start; ChunkStart < End; )
+        {
+            const uintptr_t ChunkEnd = std::min<uintptr_t>(End, ChunkStart + 0x40000000);
+
+            if (void* Found = FinAlignedValueInRangeImpl(ValuePtr, ComparisonFunction, ValueTypeSize, Alignment, ChunkStart, static_cast<uint32_t>(ChunkEnd - ChunkStart)))
+                return Found;
+
+            ChunkStart = ChunkEnd;
         }
-        CommandPtr += LC->cmdsize;
     }
     return nullptr;
 }

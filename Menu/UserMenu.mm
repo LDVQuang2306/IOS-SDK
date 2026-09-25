@@ -4,13 +4,12 @@
 #include <thread>
 #include <vector>
 
-// Forward declaration if StartDump isn't in main.h
-void StartDump();
-
 void UserMenu::RenderMenu()
 {
-    CGFloat screenWidth = ([UIApplication sharedApplication].windows[0].rootViewController.view.frame.size.width);
-    CGFloat screenHeight = ([UIApplication sharedApplication].windows[0].rootViewController.view.frame.size.height);
+    UIView* const MainView = GetMainView();
+    const CGRect ScreenBounds = MainView ? MainView.frame : [[UIScreen mainScreen] bounds];
+
+    CGFloat screenWidth = ScreenBounds.size.width;
 
     CGFloat windowWidth = 500;
     CGFloat windowHeight = 350;
@@ -24,17 +23,27 @@ void UserMenu::RenderMenu()
 
     if (ImGui::Begin("Dumper Console", NULL, ImGuiWindowFlags_NoCollapse))
     {
+        const bool bIsDumping = IsDumpRunning();
+
         // --- Top Bar (Buttons) ---
-        if (ImGui::Button("Start Dump"))
+        if (bIsDumping)
+            ImGui::BeginDisabled();
+
+        if (ImGui::Button(bIsDumping ? "Dumping..." : "Start Dump"))
         {
-            // Run in a detached thread to prevent freezing the UI
+            // Run in a detached thread to prevent freezing the UI. StartDump() refuses to run twice at the same time.
             std::thread([]{
                 StartDump();
             }).detach();
         }
+
+        if (bIsDumping)
+            ImGui::EndDisabled();
+
         ImGui::SameLine();
         if (ImGui::Button("Copy to Clipboard")) {
-            ImGui::LogToClipboard();
+            const std::string AllText = Console::Get().GetAllText();
+            [UIPasteboard generalPasteboard].string = [NSString stringWithUTF8String:AllText.c_str()] ?: @"";
         }
         
         ImGui::Separator();

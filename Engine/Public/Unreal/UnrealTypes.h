@@ -79,7 +79,7 @@ private:
 	inline static UnrealString(*ToStr)(const void* Name) = nullptr;
 
 private:
-	const uint8* Address;
+	const uint8* Address = nullptr;
 
 public:
 	FName() = default;
@@ -87,10 +87,18 @@ public:
 	FName(const void* Ptr);
 
 public:
-	static void Init(bool bForceGNames = false);
+	/* Both return false (and leave FName unusable) instead of crashing later when names can't be resolved. */
+	static bool Init(bool bForceGNames = false);
 	static void InitFallback();
 
-	static void Init(int32 OverrideOffset, EOffsetOverrideType OverrideType = EOffsetOverrideType::AppendString, bool bIsNamePool = false, const char* const ModuleName = nullptr);
+	static bool Init(int32 OverrideOffset, EOffsetOverrideType OverrideType = EOffsetOverrideType::AppendString, bool bIsNamePool = false, const char* const ModuleName = nullptr);
+
+	static inline bool IsInitialized() { return ToStr != nullptr; }
+
+private:
+	static void SetGNamesToStr();
+
+public:
 
 public:
 	inline const void* GetAddress() const { return Address; }

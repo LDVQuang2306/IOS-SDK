@@ -27,7 +27,7 @@ inline void InitSettings()
  *
  * Lifted straight from Mj0x's UEGameProfile GetNamesPtr / GetGUObjectArrayPtr
  * idiom — paste a vector of {ida_pattern, step} pairs and call. */
-static int32 FindOffsetByIDAPatterns(std::initializer_list<std::pair<const char*, int>> Patterns, const char* Label, const char* ModuleName = nullptr)
+[[maybe_unused]] static int32 FindOffsetByIDAPatterns(std::initializer_list<std::pair<const char*, int>> Patterns, const char* Label, const char* ModuleName = nullptr)
 {
 	const auto [ImageBase, ImageSize, Header, Slide] = GetImageBaseAndSize(ModuleName);
 	if (!ImageBase) { LogError("FindOffsetByIDAPatterns[%s]: module not found", Label); return 0; }
@@ -50,48 +50,90 @@ static int32 FindOffsetByIDAPatterns(std::initializer_list<std::pair<const char*
 	return 0;
 }
 
+/*
+* Manual overrides. Everything is auto-detected by default (0 / -1), including Delta Force's shuffled GUObjectArray
+* layout and its encrypted FName strings. Offsets are relative to the image base of Settings::General::DefaultModuleName.
+* An override that doesn't validate (e.g. outdated after a game update) is ignored and auto-detection is used instead.
+*/
+namespace DumperOverrides
+{
+	/* Offset of the TUObjectArray (FUObjectArray::ObjObjects), 0 = auto */
+	constexpr int32 GObjectsOffset = 0x0;
+	constexpr int32 GObjectsElementsPerChunk = 0x10000;
 
-void Generator::InitEngineCore()
+	/* Member offsets of the TUObjectArray. Delta Force example: { .ObjectsOffset = 0x20, .MaxElementsOffset = 0x10, .NumElementsOffset = 0x04, .MaxChunksOffset = 0x00, .NumChunksOffset = 0x14 } */
+	constexpr FChunkedFixedUObjectArrayLayout GObjectsLayout = FChunkedFixedUObjectArrayLayout{};
+
+	/* Offset of the FNamePool (bGNamesIsNamePool = true, UE4.23+) or of the global 'TNameEntryArray*' (false, UE4.22 and below), 0 = auto */
+	constexpr int32 GNamesOffset = 0x0;
+	constexpr bool bGNamesIsNamePool = true;
+
+	/* Vtable index of UObject::ProcessEvent, -1 = auto (ARM64 vtable scorer) */
+	constexpr int32 ProcessEventIndex = -1;
+}
+
+bool Generator::InitEngineCore()
 {
 	LogInfo("Initializing Engine Core...");
-	ObjectArray::Init();
-	/* Per-game FName decryption hooks. Install BEFORE FName::Init.
-	 * Pick whichever match the target game; unused hooks default to identity.
+
+	const char* const ModuleName = Settings::General::DefaultModuleName;
+
+	/* Per-game decryption hooks go here, BEFORE ObjectArray::Init / FName::Init. Delta Force needs none of them:
+	 * its FName string encryption is detected (and the decryption installed) automatically while GNames is located.
 	 *
-	 *   (1) Raw FNameEntry-bytes transform — header itself is encrypted.
-	 *       Returns a (possibly scratch) entry pointer the reader uses instead.
-	 * InitNameEntryDecryption([](uint8_t* Entry) -> uint8_t* {
-	 *     // ... bytes-in / bytes-out ...
-	 *     return Entry;
-	 * });
-	 *
-	 *   (2) Output std::string transform — DeltaForce. Header is plaintext,
-	 *       chars are XOR'd. Runs at the tail of FNameEntry::GetString on the
-	 *       already-decoded std::string.
-	 * InitNameStringDecryption([](std::string Decoded) -> std::string {
-	 *     // ... XOR Decoded chars in-place, see DeltaForce example in ReadMe.md ...
-	 *     return Decoded;
-	 * });
-	 *
-	 *   (3) TNameEntryArray pointer chain — PUBG (UE 4.17, bIsNamePool == false):
-	 * InitNameArrayDecryption([](uintptr_t Start) -> uintptr_t {
-	 *     // ... pointer-chain walk, see PUBG example in ReadMe.md ...
-	 *     return Start;
-	 * });
-	 *
-	 *   (4) FNamePool pointer indirection — Valorant (UE 4.23+, bIsNamePool == true):
-	 * InitNamePoolDecryption([](uintptr_t Start) -> uintptr_t {
-	 *     // ... reassemble pointer from scattered bytes ...
-	 *     return Start;
-	 * });
+	 *   InitObjectArrayDecryption([](void* ObjPtr) -> uint8* { return reinterpret_cast<uint8*>(uint64(ObjPtr) ^ 0x8375); });
+	 *   InitNameEntryDecryption([](uint8_t* Entry) -> uint8_t* { return Entry; });
+	 *   InitNameStringDecryption([](std::string Decoded) -> std::string { return Decoded; });
+	 *   InitNameArrayDecryption([](uintptr_t Start) -> uintptr_t { return Start; });
+	 *   InitNamePoolDecryption([](uintptr_t Start) -> uintptr_t { return Start; });
 	 */
-	int32 GNamesOff = FindOffsetByIDAPatterns({
-		{"? ? ? ? 29 01 15 91 28 21 08 8B", 0}, // HOK: World
-	}, "GNames");
-	FName::Init(GNamesOff, FName::EOffsetOverrideType::GNames, true, "NGR");
+
+	/* GObjects */
+	bool bFoundObjects = false;
+
+	if (DumperOverrides::GObjectsOffset > 0)
+		bFoundObjects = ObjectArray::Init(DumperOverrides::GObjectsOffset, DumperOverrides::GObjectsElementsPerChunk, DumperOverrides::GObjectsLayout, ModuleName);
+
+	if (!bFoundObjects)
+		bFoundObjects = ObjectArray::Init(false, ModuleName);
+
+	if (!bFoundObjects)
+	{
+		LogError("Engine Core: GObjects wasn't found. Wait until the game finished loading (lobby) and try again.");
+		return false;
+	}
+
+	/* GNames */
+	bool bFoundNames = false;
+
+	if (DumperOverrides::GNamesOffset > 0)
+		bFoundNames = FName::Init(DumperOverrides::GNamesOffset, FName::EOffsetOverrideType::GNames, DumperOverrides::bGNamesIsNamePool, ModuleName);
+
+	if (!bFoundNames)
+		bFoundNames = FName::Init();
+
+	if (!bFoundNames)
+	{
+		LogError("Engine Core: GNames wasn't found, can't resolve names. Aborting the dump.");
+		return false;
+	}
+
 	Off::Init();
+
+	/* Names and UObject offsets must resolve the most basic classes, otherwise everything generated from here on would be garbage */
+	if (!ObjectArray::FindClassFast("Object") || !ObjectArray::FindClassFast("Class") || !ObjectArray::FindClassFast("Struct"))
+	{
+		LogError("Engine Core: 'Object'/'Class'/'Struct' can't be found by name, the name or UObject offsets are wrong. Aborting the dump.");
+		return false;
+	}
+
 	PropertySizes::Init();
-	Off::InSDK::ProcessEvent::InitPE(); //Must be at this position, relies on offsets initialized in Off::Init()
+
+	if (DumperOverrides::ProcessEventIndex > 0)
+		Off::InSDK::ProcessEvent::InitPE(DumperOverrides::ProcessEventIndex, ModuleName);
+
+	if (!Off::InSDK::ProcessEvent::bIsValid)
+		Off::InSDK::ProcessEvent::InitPE(); //Must be at this position, relies on offsets initialized in Off::Init()
 
 	Off::InSDK::World::InitGWorld(); //Must be at this position, relies on offsets initialized in Off::Init()
 
@@ -99,6 +141,7 @@ void Generator::InitEngineCore()
 
 	InitSettings();
 	LogSuccess("Engine Core initialized successfully");
+	return true;
 }
 
 void Generator::InitInternal()
