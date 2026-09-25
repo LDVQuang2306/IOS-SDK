@@ -1,6 +1,7 @@
 #include "DSGen.h"
 
 #include <fstream>
+#include <stdexcept>
 
 DSGen::DSGen()
 {
@@ -185,9 +186,7 @@ void DSGen::bakeEnum(EnumHolder& enumHolder)
 void DSGen::dump()
 {
 	if (directory.empty())
-    {
-        return;
-    }
+		throw std::runtime_error("Please initialize a directory first!");
 
 	constexpr auto version = 10202;
 
@@ -200,7 +199,7 @@ void DSGen::dump()
 
 		if(offsetFile){
 			nlohmann::json credit;
-			credit["dumper_used"] = "Dumper-7 (Ported by Asura)";
+			credit["dumper_used"] = "Dumper-7";
 			credit["dumper_link"] = "https://github.com/Encryqed/Dumper-7";
 			j["credit"] = credit;
 		}

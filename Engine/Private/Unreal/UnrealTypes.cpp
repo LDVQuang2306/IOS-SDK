@@ -1,12 +1,12 @@
 
-#include <format>
+#include <format.h>
 
-#include "../../Public/Unreal/UnrealTypes.h"
-#include "../../Public/Unreal/NameArray.h"
+#include "Unreal/UnrealTypes.h"
+#include "Unreal/NameArray.h"
 
-#include "../../../Utils/Encoding/UnicodeNames.h"
-#include "../../../Utils/Encoding/UtfN.hpp"
-#include "../../../Menu/Logger.h"
+#include "Utils/Encoding/UnicodeNames.h"
+#include "Utils/Encoding/UtfN.hpp"
+#include "Menu/Logger.h"
 
 std::string MakeNameValid(UnrealString&& Name)
 {
@@ -40,15 +40,15 @@ std::string MakeNameValid(UnrealString&& Name)
 	Strrr += UtfN::utf_cp32_t{ 200 };
 
     std::u32string Utf32Name;
-    #if UEVERSION >= 421
+#if UEVERSION >= 421
+    /* TCHAR = char16_t : use UTF-16 → UTF-32 conversion. */
     Utf32Name = UtfN::Utf16StringToUtf32String<std::u32string>(Name);
-    #else
+#else
+    /* TCHAR = wchar_t (32-bit on Apple) : already UTF-32-sized, widen each codepoint. */
     Utf32Name.reserve(Name.size());
     for (TCHAR C : Name)
-    {
         Utf32Name += static_cast<char32_t>(C);
-    }
-    #endif
+#endif
 
 	bool bIsFirstIteration = true;
 	for (auto It = UtfN::utf32_iterator<std::u32string::iterator>(Utf32Name); It; ++It)
@@ -257,6 +257,8 @@ std::string FName::ToRawString() const
 	if (!Address)
 		return "None";
 
+	// DecryptNameString runs at the raw-bytes level inside NameArray::GetStr,
+	// so the wide string here is already decrypted.
 	return UtfN::WStringToString(ToRawWString());
 }
 
@@ -307,7 +309,7 @@ std::string FName::CompIdxToString(int CmpIdx)
 		{
 			int CompIdx;
 			uint8 Pad[0x4];
-		} Name{CmpIdx};
+		} Name(CmpIdx);
 
 		return FName(&Name).ToString();
 	}
@@ -317,7 +319,7 @@ std::string FName::CompIdxToString(int CmpIdx)
 		{
 			int CompIdx;
 			uint8 Pad[0xC];
-		} Name{CmpIdx};
+		} Name(CmpIdx);
 
 		return FName(&Name).ToString();
 	}

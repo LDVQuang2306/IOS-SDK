@@ -1,12 +1,13 @@
-
-#include <format>
 #include <format.h>
+#include <thread>
+#include <chrono>
 
-#include "../../Public/Unreal/UnrealObjects.h"
-#include "../../Public/Unreal/ObjectArray.h"
-#include "../../Public/OffsetFinder/Offsets.h"
+#include "Unreal/UnrealObjects.h"
+#include "Unreal/ObjectArray.h"
+#include "OffsetFinder/Offsets.h"
 
 
+#include "Menu/Logger.h"
 void* UEFFieldClass::GetAddress()
 {
 	return Class;
@@ -68,6 +69,11 @@ void* UEFField::GetAddress()
 	return Field;
 }
 
+const void* UEFField::GetAddress() const
+{
+	return Field;
+}
+
 EObjectFlags UEFField::GetFlags() const
 {
 	return *reinterpret_cast<EObjectFlags*>(Field + Off::FField::Flags);
@@ -119,6 +125,49 @@ FName UEFField::GetFName() const
 UEFField UEFField::GetNext() const
 {
 	return UEFField(*reinterpret_cast<void**>(Field + Off::FField::Next));
+}
+
+std::vector<std::pair<std::string, std::string>> UEFField::GetMetaData() const
+{
+	using ValueType = std::conditional_t<sizeof(void*) == 0x8, int64, int32>;
+
+	struct alignas(0x4) Name04Byte { uint8 Pad[0x04]; };
+	struct alignas(0x4) Name08Byte { uint8 Pad[0x08]; };
+	struct alignas(0x4) Name12Byte { uint8 Pad[0x0C]; };
+	struct alignas(0x4) Name16Byte { uint8 Pad[0x10]; };
+
+	static constexpr uintptr_t PointeFlagHasTag = 0x1;
+	static constexpr uintptr_t PointerMaskNoTag = ~0x1;
+
+
+	static auto GetPairsAsStrings = []<typename NameType>(const TMap<NameType, FString> &EnumNameValuePairs)
+	{
+		std::vector<std::pair<std::string, std::string>> Result;
+
+		for (const auto& [Key, Value] : EnumNameValuePairs)
+		{
+			Result.emplace_back(FName(&Key).ToString(), Value.ToString());
+		}
+
+		return Result;
+	};
+
+	if (Off::InSDK::Name::FNameSize > 0x8)
+	{
+		auto* Map = *reinterpret_cast<TMap<Name16Byte, FString>**>(Field + Off::FField::EditorOnlyMetadata);
+
+		if (!Map)
+			return {};
+
+		return GetPairsAsStrings(*Map);
+	}
+
+	auto* Map = *reinterpret_cast<TMap<Name08Byte, FString>**>(Field + Off::FField::EditorOnlyMetadata);
+
+	if (!Map)
+		return {};
+
+	return GetPairsAsStrings(*Map);
 }
 
 template<typename UEType>
@@ -194,6 +243,11 @@ bool UEFField::operator!=(const UEFField& Other) const
 void(*UEObject::PE)(void*, void*, void*) = nullptr;
 
 void* UEObject::GetAddress()
+{
+	return Object;
+}
+
+const void* UEObject::GetAddress() const
 {
 	return Object;
 }
@@ -428,11 +482,56 @@ bool UEField::IsNextValid() const
 
 std::vector<std::pair<FName, int64>> UEEnum::GetNameValuePairs() const
 {
-	struct alignas(0x4) Name08Byte { uint8 Pad[0x08]; };
-	struct alignas(0x4) Name16Byte { uint8 Pad[0x10]; };
-	struct alignas(0x4) UInt8As64  { uint8 Bytes[0x8]; inline operator int64() const { return Bytes[0]; }; };
+	using ValueType = std::conditional_t<sizeof(void*) == 0x8, int64, int32>;
 
-	static auto GetNameValuePairsWithIndex = []<typename NameType, typename ValueType>(const TArray<TPair<NameType, ValueType>>& EnumNameValuePairs)
+	struct alignas(0x4) Name04Byte { uint8 Pad[0x04]; };
+	struct alignas(0x4) Name08Byte { uint8 Pad[0x08]; };
+	struct alignas(0x4) Name12Byte { uint8 Pad[0x0C]; };
+	struct alignas(0x4) Name16Byte { uint8 Pad[0x10]; };
+	struct alignas(0x4) UInt8As64 { uint8 Bytes[sizeof(void*)]; inline operator int64() const { return Bytes[0]; }; };
+
+	static constexpr uintptr_t PointeFlagHasTag =  0x1;
+	static constexpr uintptr_t PointerMaskNoTag = ~0x1;
+
+	/*
+	 * For UEVersion >= UE5.6 
+	 * 
+	 * See: https://github.com/EpicGames/UnrealEngine/blob/ue5-main/Engine/Source/Runtime/CoreUObject/Public/UObject/Class.h#L3411
+	*/
+	static auto GetNameValuePairsForFNameData = [](const uintptr_t Object, const uint32_t EnumNamesOffset, const uint32_t FNameSize)
+	{
+		std::vector<std::pair<FName, int64>> Ret;
+
+		const uintptr_t TaggedNamesPtr = *reinterpret_cast<uintptr_t*>(Object + EnumNamesOffset);
+		const bool bIsNamesPtrTagged = (TaggedNamesPtr & PointeFlagHasTag) != 0;
+		const uint8* NamesPtr = reinterpret_cast<uint8*>(TaggedNamesPtr & PointerMaskNoTag);
+
+		if (!bIsNamesPtrTagged)
+		{
+			/* StaticNamesUTF8 is not supported yet. See: https://github.com/EpicGames/UnrealEngine/blob/ue5-main/Engine/Source/Runtime/CoreUObject/Public/UObject/Class.h#L3408*/
+			LogError("Dumper-7 [UEEnum::GetNameValuePairs()]: UEnum::Names pointer is tagged! This is not supported yet!");
+			std::this_thread::sleep_for(std::chrono::seconds(100));
+			exit(1);
+		}
+
+		const int64* Values = reinterpret_cast<int64*>(*reinterpret_cast<uintptr_t*>(Object + EnumNamesOffset + 0x8) & PointerMaskNoTag);
+		const int32 NumValues = *reinterpret_cast<int32*>(Object + EnumNamesOffset + 0x10);
+
+		for (uint32_t i = 0; i < NumValues; i++)
+		{
+			Ret.push_back({ FName(NamesPtr + (i * FNameSize)), Values[i] });
+		}
+
+		return Ret;
+	};
+
+	if (Settings::Internal::bIsNewUE5EnumNamesContainer)
+	{
+		return GetNameValuePairsForFNameData(reinterpret_cast<const uintptr_t>(Object), Off::UEnum::Names - 0x8, Off::InSDK::Name::FNameSize);
+	}
+
+
+	static auto GetNameValuePairsWithIndex = []<typename NameType, typename ValueType>(const TArray<TPair<NameType, ValueType>>&EnumNameValuePairs)
 	{
 		std::vector<std::pair<FName, int64>> Ret;
 
@@ -444,7 +543,7 @@ std::vector<std::pair<FName, int64>> UEEnum::GetNameValuePairs() const
 		return Ret;
 	};
 
-	static auto GetNameValuePairs = []<typename NameType>(const TArray<NameType>& EnumNameValuePairs)
+	static auto GetNameValuePairs = []<typename NameType>(const TArray<NameType>&EnumNameValuePairs)
 	{
 		std::vector<std::pair<FName, int64>> Ret;
 
@@ -456,13 +555,14 @@ std::vector<std::pair<FName, int64>> UEEnum::GetNameValuePairs() const
 		return Ret;
 	};
 
-
 	if constexpr (Settings::EngineCore::bCheckEnumNamesInUEnum)
 	{
-		static auto SetIsNamesOnlyIfDevsTookCrack = [&]<typename NameType>(const TArray<TPair<NameType, UInt8As64>>& EnumNames)
+		static auto SetIsNamesOnlyIfDevsTookCrack = [&]<typename NameType>(const TArray<TPair<NameType, UInt8As64>>&EnumNames)
 		{
-			/* This is a hacky workaround for UEnum::Names which somtimes store the enum-value and sometimes don't. I've seem much of UE, but what drugs did some devs take???? */
-			Settings::Internal::bIsEnumNameOnly = EnumNames[0].Second != 0 || EnumNames[1].Second != 1;
+			/* This is a hacky workaround for UEnum::Names which sometimes store the enum-value and sometimes don't. I've seen much of UE, but what drugs did some devs take???? */
+			//Settings::Internal::bIsEnumNameOnly = EnumNames[0].Second != 0 || EnumNames[1].Second != 1;
+			// TODO (encryqed): Bruder was??? fix das mal iwi das geht nur durch hardcode idk frag fisch 
+			Settings::Internal::bIsEnumNameOnly = false;
 		};
 
 		if (Settings::Internal::bUseCasePreservingName)
@@ -479,12 +579,12 @@ std::vector<std::pair<FName, int64>> UEEnum::GetNameValuePairs() const
 	{
 		if (Settings::Internal::bUseCasePreservingName)
 			return GetNameValuePairs(*reinterpret_cast<TArray<Name16Byte>*>(Object + Off::UEnum::Names));
-		
+
 		return GetNameValuePairs(*reinterpret_cast<TArray<Name08Byte>*>(Object + Off::UEnum::Names));
 	}
 	else
 	{
-		/* This only applies very very rarely on weir UE4.13 or UE4.14 games where the devs didn't know what they were doing. */
+		/* This only applies very very rarely on weird UE4.13 or UE4.14 games where the devs didn't know what they were doing. */
 		if (Settings::Internal::bIsSmallEnumValue)
 		{
 			if (Settings::Internal::bUseCasePreservingName)
@@ -495,7 +595,7 @@ std::vector<std::pair<FName, int64>> UEEnum::GetNameValuePairs() const
 
 		if (Settings::Internal::bUseCasePreservingName)
 			return GetNameValuePairsWithIndex(*reinterpret_cast<TArray<TPair<Name16Byte, int64>>*>(Object + Off::UEnum::Names));
-		
+
 		return GetNameValuePairsWithIndex(*reinterpret_cast<TArray<TPair<Name08Byte, int64>>*>(Object + Off::UEnum::Names));
 	}
 }
@@ -532,9 +632,9 @@ UEFField UEStruct::GetChildProperties() const
 	return UEFField(*reinterpret_cast<void**>(Object + Off::UStruct::ChildProperties));
 }
 
-int32 UEStruct::GetMinAlignment() const
+int16 UEStruct::GetMinAlignment() const
 {
-	return *reinterpret_cast<int32*>(Object + Off::UStruct::MinAlignemnt);
+	return *reinterpret_cast<int16*>(Object + Off::UStruct::MinAlignment);
 }
 
 int32 UEStruct::GetStructSize() const
@@ -570,7 +670,6 @@ std::vector<UEProperty> UEStruct::GetProperties() const
 
 		return Properties;
 	}
-
 	for (UEField Field = GetChild(); Field; Field = Field.GetNext())
 	{
 		if (Field.IsA(EClassCastFlags::Property))
@@ -732,12 +831,15 @@ void* UEProperty::GetAddress()
 	return Base;
 }
 
+const void* UEProperty::GetAddress() const
+{
+	return Base;
+}
+
 std::pair<UEClass, UEFFieldClass> UEProperty::GetClass() const
 {
 	if (Settings::Internal::bUseFProperty)
-	{
 		return { UEClass(0), UEFField(Base).GetClass() };
-	}
 
 	return { UEObject(Base).GetClass(), UEFFieldClass(0) };
 }
@@ -775,6 +877,9 @@ FName UEProperty::GetFName() const
 
 int32 UEProperty::GetArrayDim() const
 {
+	if (Settings::Internal::bUseUint8ArrayDim)
+		return *reinterpret_cast<uint8*>(Base + Off::Property::ArrayDim);
+
 	return *reinterpret_cast<int32*>(Base + Off::Property::ArrayDim);
 }
 
@@ -831,7 +936,7 @@ int32 UEProperty::GetAlignment() const
 	}
 	else if (TypeFlags & EClassCastFlags::UInt64Property)
 	{
-		return alignof(uint64); // 0x8
+		return sizeof(void*); // 0x4 on 32bit or 0x8 on 64bit
 	}
 	else if (TypeFlags & EClassCastFlags::Int8Property)
 	{
@@ -847,7 +952,7 @@ int32 UEProperty::GetAlignment() const
 	}
 	else if (TypeFlags & EClassCastFlags::Int64Property)
 	{
-		return alignof(int64); // 0x8
+		return sizeof(void*); // 0x4 on 32bit or 0x8 on 64bit
 	}
 	else if (TypeFlags & EClassCastFlags::FloatProperty)
 	{
@@ -855,11 +960,11 @@ int32 UEProperty::GetAlignment() const
 	}
 	else if (TypeFlags & EClassCastFlags::DoubleProperty)
 	{
-		return alignof(double); // 0x8
+		return sizeof(void*); // 0x4 on 32bit or 0x8 on 64bit
 	}
 	else if (TypeFlags & EClassCastFlags::ClassProperty)
 	{
-		return alignof(void*); // 0x8
+		return alignof(void*); // 0x4 / 0x8
 	}
 	else if (TypeFlags & EClassCastFlags::NameProperty)
 	{
@@ -907,7 +1012,7 @@ int32 UEProperty::GetAlignment() const
 	}
 	else if (TypeFlags & EClassCastFlags::ObjectProperty)
 	{
-		return alignof(void*); // 0x8
+		return alignof(void*); // 0x4 / 0x8
 	}
 	else if (TypeFlags & EClassCastFlags::MapProperty)
 	{
@@ -925,7 +1030,7 @@ int32 UEProperty::GetAlignment() const
 	}
 	else if (TypeFlags & EClassCastFlags::InterfaceProperty)
 	{
-		return alignof(void*); // 0x8
+		return alignof(void*); // 0x4 / 0x8
 	}
 	else if (TypeFlags & EClassCastFlags::FieldPathProperty)
 	{
@@ -1100,6 +1205,9 @@ std::string UEProperty::GetCppType() const
 	}
 	else if (TypeFlags & EClassCastFlags::FieldPathProperty)
 	{
+		if (Settings::Internal::bIsObjPtrInsteadOfFieldPathProperty)
+			return Cast<UEObjectProperty>().GetCppType();
+
 		return Cast<UEFieldPathProperty>().GetCppType();
 	}
 	else if (TypeFlags & EClassCastFlags::DelegateProperty)
@@ -1146,20 +1254,27 @@ uint8 UEBoolProperty::GetFieldMask() const
 	return reinterpret_cast<Off::BoolProperty::UBoolPropertyBase*>(Base + Off::BoolProperty::Base)->FieldMask;
 }
 
+uint8 UEBoolProperty::GetByteOffset() const
+{
+	return reinterpret_cast<Off::BoolProperty::UBoolPropertyBase*>(Base + Off::BoolProperty::Base)->ByteOffset;
+}
+
 uint8 UEBoolProperty::GetBitIndex() const
 {
-	uint8 FieldMask = GetFieldMask();
+	const uint8 FieldMask = GetFieldMask();
+
+	const uint8_t InitialBitOffset = GetByteOffset() * 0x8; // Example: Offset 3 ==> This bitfield is in the 4th bit ==> 3 lower bytes have 3 * 8 = 24 bits
 
 	if (FieldMask != 0xFF)
 	{
-		if (FieldMask == 0x01) { return 0; }
-		if (FieldMask == 0x02) { return 1; }
-		if (FieldMask == 0x04) { return 2; }
-		if (FieldMask == 0x08) { return 3; }
-		if (FieldMask == 0x10) { return 4; }
-		if (FieldMask == 0x20) { return 5; }
-		if (FieldMask == 0x40) { return 6; }
-		if (FieldMask == 0x80) { return 7; }
+		if (FieldMask == 0x01) { return InitialBitOffset + 0; }
+		if (FieldMask == 0x02) { return InitialBitOffset + 1; }
+		if (FieldMask == 0x04) { return InitialBitOffset + 2; }
+		if (FieldMask == 0x08) { return InitialBitOffset + 3; }
+		if (FieldMask == 0x10) { return InitialBitOffset + 4; }
+		if (FieldMask == 0x20) { return InitialBitOffset + 5; }
+		if (FieldMask == 0x40) { return InitialBitOffset + 6; }
+		if (FieldMask == 0x80) { return InitialBitOffset + 7; }
 	}
 
 	return 0xFF;
@@ -1304,14 +1419,14 @@ std::string UEEnumProperty::GetCppType() const
 	return GetUnderlayingProperty().GetCppType();
 }
 
-UEFFieldClass UEFieldPathProperty::GetFielClass() const
+UEFFieldClass UEFieldPathProperty::GetFieldClass() const
 {
 	return UEFFieldClass(*reinterpret_cast<void**>(Base + Off::FieldPathProperty::FieldClass));
 }
 
 std::string UEFieldPathProperty::GetCppType() const
 {
-	return fmt::format("TFieldPath<struct {}>", GetFielClass().GetCppName());
+	return fmt::format("TFieldPath<struct {}>", GetFieldClass().GetCppName());
 }
 
 UEProperty UEOptionalProperty::GetValueProperty() const

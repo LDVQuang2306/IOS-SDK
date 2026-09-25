@@ -1,11 +1,11 @@
-
-#include "../../../Engine/Public/Unreal/ObjectArray.h"
-#include "../../Public/Managers/StructManager.h"
-
-#include "../../../Menu/Logger.h"
-
+#include <algorithm>
 #include <thread>
+#include <chrono>
 
+#include "Unreal/ObjectArray.h"
+#include "Managers/StructManager.h"
+
+#include "Menu/Logger.h"
 StructInfoHandle::StructInfoHandle(const StructInfo& InInfo)
 	: Info(&InInfo)
 {
@@ -58,20 +58,36 @@ bool StructInfoHandle::IsPartOfCyclicPackage() const
 
 void StructManager::InitAlignmentsAndNames()
 {
-	constexpr int32 DefaultClassAlignment = 0x8;
+	constexpr int32 DefaultClassAlignment = sizeof(void*);
 
 	const UEClass InterfaceClass = ObjectArray::FindClassFast("Interface");
 
+	const UEClass OnlineEngineInterfaceImplClass = ObjectArray::FindClassFast("OnlineEngineInterfaceImpl");
+
+	/*
+	 *  Cache all struct objects to avoid multiple full ObjectArray iterations
+	 */
+	std::vector<UEStruct> AllStructs;
+	AllStructs.reserve(10000);
+	
 	for (auto Obj : ObjectArray())
 	{
-		if (!Obj.IsA(EClassCastFlags::Struct) /* || Obj.IsA(EClassCastFlags::Function)*/)
-			continue;
+		if (Obj.IsA(EClassCastFlags::Struct))
+			AllStructs.push_back(Obj.Cast<UEStruct>());
+	}
 
-		UEStruct ObjAsStruct = Obj.Cast<UEStruct>();
-
+	for (auto ObjAsStruct : AllStructs)
+	{
 		// Add name to override info
-		StructInfo& NewOrExistingInfo = StructInfoOverrides[Obj.GetIndex()];
-		NewOrExistingInfo.Name = UniqueNameTable.FindOrAdd(Obj.GetCppName(), !Obj.IsA(EClassCastFlags::Function)).first;
+		StructInfo& NewOrExistingInfo = StructInfoOverrides[ObjAsStruct.GetIndex()];
+
+		std::string CppName = ObjAsStruct.GetCppName();
+
+		// Hardcoded fix for two 'UOnlineEngineInterfaceImpl' classes in the same package. Check will only match one of them.
+		if (ObjAsStruct == OnlineEngineInterfaceImplClass) [[unlikely]]
+			CppName += '2';
+
+		NewOrExistingInfo.Name = UniqueNameTable.FindOrAdd(CppName, !ObjAsStruct.IsA(EClassCastFlags::Function)).first;
 
 		// Interfaces inherit from UObject by default, but as a workaround to no virtual-inheritance we make them empty
 		if (ObjAsStruct.HasType(InterfaceClass))
@@ -84,7 +100,7 @@ void StructManager::InitAlignmentsAndNames()
 			continue;
 		}
 
-		int32 MinAlignment = ObjAsStruct.GetMinAlignment();
+		const int32 MinAlignment = ObjAsStruct.GetMinAlignment();
 		int32 HighestMemberAlignment = 0x1; // starting at 0x1 when checking **all**, not just struct-properties
 
 		// Find member with the highest alignment
@@ -108,16 +124,15 @@ void StructManager::InitAlignmentsAndNames()
 		else
 		{
 			NewOrExistingInfo.bUseExplicitAlignment = MinAlignment > HighestMemberAlignment;
-			NewOrExistingInfo.Alignment = fmax(MinAlignment, HighestMemberAlignment);
+			NewOrExistingInfo.Alignment = std::max(MinAlignment, HighestMemberAlignment);
 		}
 	}
 
-	for (auto Obj : ObjectArray())
+	// Second pass: Fix alignments based on super classes (reuse cached list)
+	for (auto ObjAsStruct : AllStructs)
 	{
-		if (!Obj.IsA(EClassCastFlags::Struct) || Obj.IsA(EClassCastFlags::Function) || Obj.Cast<UEStruct>().HasType(InterfaceClass))
+		if (ObjAsStruct.IsA(EClassCastFlags::Function) || ObjAsStruct.HasType(InterfaceClass))
 			continue;
-
-		UEStruct ObjAsStruct = Obj.Cast<UEStruct>();
 
 		constexpr int MaxNumSuperClasses = 0x30;
 
@@ -155,14 +170,15 @@ void StructManager::InitSizesAndIsFinal()
 {
 	const UEClass InterfaceClass = ObjectArray::FindClassFast("Interface");
 
-	for (auto Obj : ObjectArray())
+	// Reuse cached struct list from InitAlignmentsAndNames
+	for (const auto& [Index, Info] : StructInfoOverrides)
 	{
-		if (!Obj.IsA(EClassCastFlags::Struct) || Obj.Cast<UEStruct>().HasType(InterfaceClass))
+		UEStruct ObjAsStruct = ObjectArray::GetByIndex<UEStruct>(Index);
+		
+		if (ObjAsStruct.HasType(InterfaceClass))
 			continue;
 
-		UEStruct ObjAsStruct = Obj.Cast<UEStruct>();
-
-		StructInfo& NewOrExistingInfo = StructInfoOverrides[Obj.GetIndex()];
+		StructInfo& NewOrExistingInfo = StructInfoOverrides[Index];
 
 		// Initialize struct-size if it wasn't set already
 		if (NewOrExistingInfo.Size > ObjAsStruct.GetStructSize())
@@ -192,7 +208,7 @@ void StructManager::InitSizesAndIsFinal()
 		/* No need to check any other structs, as finding the LastMemberEnd only involves this struct */
 		NewOrExistingInfo.LastMemberEnd = LastMemberEnd;
 
-		if (!Super || Obj.IsA(EClassCastFlags::Function))
+		if (!Super || ObjAsStruct.IsA(EClassCastFlags::Function))
 			continue;
 
 		/*
@@ -206,8 +222,8 @@ void StructManager::InitSizesAndIsFinal()
 
 			if (It == StructInfoOverrides.end())
 			{
-                LogError("\n\n\nDumper-7: Error, struct wasn't found in 'StructInfoOverrides'! Exiting...\n\n\n");
-				std::this_thread::sleep_for(std::chrono::seconds(10000));
+				LogError("\n\n\nDumper-7: Error, struct wasn't found in 'StructInfoOverrides'! Exiting...\n\n\n");
+				std::this_thread::sleep_for(std::chrono::seconds(10));
 				exit(1);
 			}
 
@@ -250,7 +266,7 @@ void StructManager::Init()
 	* UObject however doesn't have a super, so this needs to be set manually.
 	*/
 	const UEObject UObjectClass = ObjectArray::FindClassFast("Object");
-	StructInfoOverrides.find(UObjectClass.GetIndex())->second.Alignment = 0x8;
+	StructInfoOverrides.find(UObjectClass.GetIndex())->second.Alignment = sizeof(void*);
 
 	/* I still hate whoever decided to call "UStruct" "Ustruct" on some UE versions. */
 	if (const UEObject UStructClass = ObjectArray::FindClassFast("struct"))

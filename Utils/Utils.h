@@ -15,46 +15,18 @@
 #include <mach-o/getsect.h>
 #include <dlfcn.h>
 #include "Settings.h"
+#include "TmpUtils.h"
 
+/* Credits: https://en.cppreference.com/w/cpp/string/byte/tolower */
 inline std::string str_tolower(std::string S)
 {
     std::transform(S.begin(), S.end(), S.begin(), [](unsigned char C) { return std::tolower(C); });
     return S;
 }
 
-template<typename CharType>
-inline int32_t StrlenHelper(const CharType* Str)
-{
-    if constexpr (std::is_same<CharType, char>())
-    {
-        return strlen(Str);
-    }
-    else if constexpr (std::is_same<CharType, char16_t>())
-    {
-        return std::char_traits<char16_t>::length(Str);
-    }
-    else
-    {
-        return wcslen(Str);
-    }
-}
-
-template<typename CharType>
-inline bool StrnCmpHelper(const CharType* Left, const CharType* Right, size_t NumCharsToCompare)
-{
-    if constexpr (std::is_same<CharType, char>())
-    {
-        return strncmp(Left, Right, NumCharsToCompare) == 0;
-    }
-    else if constexpr (std::is_same<CharType, char16_t>())
-    {
-        return std::char_traits<char16_t>::compare(Left, Right, NumCharsToCompare) == 0;
-    }
-    else
-    {
-        return wcsncmp(Left, Right, NumCharsToCompare) == 0;
-    }
-}
+// StrlenHelper / StrnCmpHelper: provided by TmpUtils.h (upstream-shared). iOS adds char16_t specialization below.
+template<> inline int32_t StrlenHelper<char16_t>(const char16_t* Str) { return std::char_traits<char16_t>::length(Str); }
+template<> inline bool StrnCmpHelper<char16_t>(const char16_t* Left, const char16_t* Right, size_t N) { return std::char_traits<char16_t>::compare(Left, Right, N) == 0; }
 
 namespace ASMUtils
 {
@@ -198,6 +170,7 @@ struct MachImageInfo {
     uintptr_t Base;
     size_t Size;
     const struct mach_header_64* Header;
+    intptr_t Slide;
 };
 
 inline MachImageInfo GetImageBaseAndSize(const char* ImageName = nullptr)
@@ -209,6 +182,7 @@ inline MachImageInfo GetImageBaseAndSize(const char* ImageName = nullptr)
         if (!ImageName || strstr(Name, ImageName))
         {
             const auto* Header = (const struct mach_header_64*)_dyld_get_image_header(i);
+            intptr_t Slide = _dyld_get_image_vmaddr_slide(i);
             
             // Calculate real image size by iterating segments
             uintptr_t MinAddr = ~0UL;
@@ -224,10 +198,10 @@ inline MachImageInfo GetImageBaseAndSize(const char* ImageName = nullptr)
                 }
                 Cmd = (const struct load_command*)((uintptr_t)Cmd + Cmd->cmdsize);
             }
-            return { (uintptr_t)Header, (size_t)(MaxAddr - MinAddr), Header };
+            return { (uintptr_t)Header, (size_t)(MaxAddr - MinAddr), Header, Slide };
         }
     }
-    return { 0, 0, nullptr };
+    return { 0, 0, nullptr, 0 };
 }
 
 inline uintptr_t GetModuleBase(const char* SearchModuleName = nullptr) {
@@ -330,7 +304,7 @@ inline bool IsValidVirtualAddress(const uintptr_t Address)
 
 inline bool IsInProcessRange(const uintptr_t Address)
 {
-    const auto [Base, Size, Header] = GetImageBaseAndSize();
+    const auto [Base, Size, Header, Slide] = GetImageBaseAndSize();
     if (Address >= Base && Address < (Base + Size))
         return true;
     return IsInAnyModules(Address);
@@ -476,7 +450,7 @@ inline void* FindPatternInRange(const char* Signature, const uint8_t* Start, uin
 
 inline void* FindPattern(const char* Signature, const char* SegmentName = "__TEXT", uint32_t Offset = 0, uintptr_t StartAddress = 0x0)
 {
-    const auto [ImageBase, ImageSize, Header] = GetImageBaseAndSize();
+    const auto [ImageBase, ImageSize, Header, Slide] = GetImageBaseAndSize();
     
     // Default to ImageBase (Scan All)
     uintptr_t SearchStart = ImageBase;
@@ -523,7 +497,7 @@ inline T* FindAlignedValueInProcessInRange(T Value, int32_t Alignment, uintptr_t
 template<typename T>
 inline T* FindAlignedValueInProcess(T Value, const std::string& Sectionname = "__DATA", int32_t Alignment = alignof(T), bool bSearchAllSections = false)
 {
-    const auto [ImageBase, ImageSize, Header] = GetImageBaseAndSize();
+    const auto [ImageBase, ImageSize, Header, Slide] = GetImageBaseAndSize();
     uintptr_t SearchStart = ImageBase;
     uintptr_t SearchRange = ImageSize;
 
@@ -700,7 +674,7 @@ public:
 template<typename Type = const char*>
 inline MemAddress FindByString(Type RefStr)
 {
-    const auto [ImageBase, ImageSize, Header] = GetImageBaseAndSize();
+    const auto [ImageBase, ImageSize, Header, Slide] = GetImageBaseAndSize();
     const auto [TextSection, TextSize] = GetSegmentByName(Header, "__TEXT");
     
     if (!TextSection) return nullptr;
@@ -740,7 +714,7 @@ inline MemAddress FindByStringInAllSections(const CharType* RefStr, uintptr_t St
 {
     static_assert(std::is_same_v<CharType, char> || std::is_same_v<CharType, wchar_t> || std::is_same_v<CharType, char16_t>, "Only char/wchar_t/char16_t supported");
 
-    const auto [ImageBase, ImageSize, Header] = GetImageBaseAndSize();
+    const auto [ImageBase, ImageSize, Header, Slide] = GetImageBaseAndSize();
     const uintptr_t ImageEnd = ImageBase + ImageSize;
 
     if (StartAddress != 0x0 && (StartAddress < ImageBase || StartAddress > ImageEnd))
@@ -777,7 +751,7 @@ inline MemAddress FindByStringInAllSections(const CharType* RefStr, uintptr_t St
 template<typename Type = const char*>
 inline MemAddress FindUnrealExecFunctionByString(Type RefStr, void* StartAddress = nullptr)
 {
-    const auto [ImageBase, ImageSize, Header] = GetImageBaseAndSize();
+    const auto [ImageBase, ImageSize, Header, Slide] = GetImageBaseAndSize();
     uint8_t* SearchStart = StartAddress ? reinterpret_cast<uint8_t*>(StartAddress) : reinterpret_cast<uint8_t*>(ImageBase);
     int32_t SearchRange = ImageSize;
 
@@ -821,9 +795,9 @@ inline MemAddress FindByWStringInAllSections(const TCHAR* RefStr)
     return FindByStringInAllSections<bCheckIfLeaIsStrPtr, TCHAR>(RefStr);
 }
 
-namespace FileNameHelper
+namespace FileNameHelper_IOSRemoved
 {
-    inline void MakeValidFileName(std::string& InOutName)
+    inline void _MakeValidFileName_Removed(std::string& InOutName)
     {
         for (char& c : InOutName)
         {

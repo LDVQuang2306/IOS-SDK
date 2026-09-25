@@ -3,13 +3,45 @@
 #include <vector>
 #include <cstdio> 
 
-#include "../../Public/Unreal/ObjectArray.h"
-#include "../../Public/Unreal/NameArray.h"
-#include "../../../Utils/Utils.h"
-#include "../../../Utils/Encoding/UtfN.hpp"
-#include "../../../Menu/Logger.h"
+#include "Unreal/ObjectArray.h"
+#include "Unreal/NameArray.h"
+#include "Utils/Utils.h"
+#include "Utils/Encoding/UtfN.hpp"
+#include "Menu/Logger.h"
 
 uint8* NameArray::GNames = nullptr;
+
+void NameArray::InitEntryDecryption(uint8_t* (*DecryptionFunction)(uint8_t* RawEntryPtr), const char* DecryptionLambdaAsStr)
+{
+    LogInfo("Initializing FNameEntry decryption: %s", DecryptionLambdaAsStr);
+    DecryptNameEntry = DecryptionFunction;
+    NameEntryDecryptionLambdaStr = DecryptionLambdaAsStr;
+    LogSuccess("FNameEntry decryption initialized");
+}
+
+void NameArray::InitStringDecryption(std::string (*DecryptionFunction)(std::string Decoded), const char* DecryptionLambdaAsStr)
+{
+    LogInfo("Initializing FName output-string decryption: %s", DecryptionLambdaAsStr);
+    DecryptNameString = DecryptionFunction;
+    NameStringDecryptionLambdaStr = DecryptionLambdaAsStr;
+    LogSuccess("FName output-string decryption initialized");
+}
+
+void NameArray::InitArrayDecryption(uintptr_t (*DecryptionFunction)(uintptr_t EncryptedNameArrayData), const char* DecryptionLambdaAsStr)
+{
+    LogInfo("Initializing TNameEntryArray pointer decryption: %s", DecryptionLambdaAsStr);
+    DecryptNameArray = DecryptionFunction;
+    NameArrayDecryptionLambdaStr = DecryptionLambdaAsStr;
+    LogSuccess("TNameEntryArray pointer decryption initialized");
+}
+
+void NameArray::InitPoolDecryption(uintptr_t (*DecryptionFunction)(uintptr_t EncryptedNamePoolData), const char* DecryptionLambdaAsStr)
+{
+    LogInfo("Initializing FNamePool pointer decryption: %s", DecryptionLambdaAsStr);
+    DecryptNamePool = DecryptionFunction;
+    NamePoolDecryptionLambdaStr = DecryptionLambdaAsStr;
+    LogSuccess("FNamePool pointer decryption initialized");
+}
 
 FNameEntry::FNameEntry(void* Ptr)
     : Address((uint8*)Ptr)
@@ -29,7 +61,10 @@ std::string FNameEntry::GetString()
     if (!Address)
         return "";
 
-    return std::string(GetWString().begin(), GetWString().end());
+    // DecryptNameString is applied inside NameArray::GetStr on the raw narrow
+    // bytes, so GetWString() already returns decrypted wide chars here.
+    auto Wide = GetWString();
+    return std::string(Wide.begin(), Wide.end());
 }
 
 void* FNameEntry::GetAddress()
@@ -42,53 +77,22 @@ void FNameEntry::Init(const uint8* FirstChunkPtr, int64 NameEntryStringOffset)
     LogInfo("Dumper-7: [FNameEntry] Initializing...");
     if (Settings::Internal::bUseNamePool)
     {
-        constexpr int64 NoneStrLen = 0x4;
-        constexpr uint16 BytePropertyStrLen = 0xC; // Length of "ByteProperty"
-        constexpr uint32 BytePropertyStartAsUint32 = 'etyB'; // "Byte"
 
         Off::FNameEntry::NamePool::StringOffset = (int32)NameEntryStringOffset;
         Off::FNameEntry::NamePool::HeaderOffset = (int32)NameEntryStringOffset == 6 ? 4 : 0;
- 
-        const uint8* AssumedBytePropertyEntry = *reinterpret_cast<uint8* const*>(FirstChunkPtr) + NameEntryStringOffset + NoneStrLen;
 
-        /* Check if there's pading after an FNameEntry. Check if there's up to 0x8 bytes padding. */
-        for (int i = 0; i < 0x8; i++)
-        {
-            if (IsBadReadPtr(AssumedBytePropertyEntry + NameEntryStringOffset)) break;
-            const uint32 FirstPartOfByteProperty = *reinterpret_cast<const uint32*>(AssumedBytePropertyEntry + NameEntryStringOffset);
+        LogSuccess("Dumper-7: [FNameEntry] NamePool initialized (Stride: %d)", Off::InSDK::NameArray::FNameEntryStride);
 
-            if (FirstPartOfByteProperty == BytePropertyStartAsUint32)
-                break;
-
-            AssumedBytePropertyEntry += 0x1;
-        }
-
-        uint16 BytePropertyHeader = *reinterpret_cast<const uint16*>(AssumedBytePropertyEntry + Off::FNameEntry::NamePool::HeaderOffset);
-
-        /* Shifiting past the size of the header is not allowed, so limmit the shiftcount here */
-        constexpr int32 MaxAllowedShiftCount = sizeof(BytePropertyHeader) * 0x8;
-        LogInfo("Dumper-7: MaxAllowedShiftCount %d", MaxAllowedShiftCount);
-        LogInfo("Dumper-7: BytePropertyHeader %d", BytePropertyHeader);
-        while (BytePropertyHeader != BytePropertyStrLen && FNameEntryLengthShiftCount < MaxAllowedShiftCount)
-        {
-            FNameEntryLengthShiftCount++;
-            BytePropertyHeader >>= 1;
-        }
-
-        if (FNameEntryLengthShiftCount == MaxAllowedShiftCount)
-        {
-            LogError("\nDumper-7: Error, couldn't get FNameEntryLengthShiftCount!\n");
-            LogError("Dumper-7: FNameEntryLength %d | MaxAllowedShiftCount %d", FNameEntryLengthShiftCount, MaxAllowedShiftCount);
-            GetStr = [](uint8* NameEntry) -> UnrealString { return TEXT("Invalid FNameEntryLengthShiftCount!"); };
-            return;
-        }
-
-        LogSuccess("Dumper-7: [FNameEntry] NamePool initialized (Shift: %d, Stride: %d)", FNameEntryLengthShiftCount, Off::InSDK::NameArray::FNameEntryStride);
-
+        /* Standard UE 4.23+ FNamePool entry reader (upstream Dumper-7 layout).
+         * Header is 2 bytes at HeaderOffset; top 10 bits = name length, bit 0 = wide flag.
+         * NameLen == 0 indicates a numbered entry referencing a base by index. */
         GetStr = [](uint8* NameEntry) -> UnrealString
         {
+            // Per-game FNameEntry content decryption (no-op by default).
+            NameEntry = NameArray::DecryptNameEntry(NameEntry);
+
             const uint16 HeaderWithoutNumber = *reinterpret_cast<uint16*>(NameEntry + Off::FNameEntry::NamePool::HeaderOffset);
-            const int32 NameLen = HeaderWithoutNumber >> FNameEntry::FNameEntryLengthShiftCount;
+            const int32 NameLen = HeaderWithoutNumber >> 6;
 
             if (NameLen == 0)
             {
@@ -103,10 +107,18 @@ void FNameEntry::Init(const uint8* FirstChunkPtr, int64 NameEntryStringOffset)
                 return NameArray::GetNameEntry(NextEntryIndex).GetWString();
             }
 
+            // Wide-char path: no DecryptNameString applied. The hook signature is for
+            // narrow byte XOR; wide encryption (no known shipping game does this) would
+            // need UTF-16-aware math, not a byte-level hook.
             if (HeaderWithoutNumber & NameWideMask)
                 return UnrealString(reinterpret_cast<const TCHAR*>(NameEntry + Off::FNameEntry::NamePool::StringOffset), NameLen);
 
-            return UtfN::StringToWString(std::string(reinterpret_cast<const char*>(NameEntry + Off::FNameEntry::NamePool::StringOffset), NameLen));
+            /* Decrypt at the raw-bytes level BEFORE wide conversion. UTF-8 inflation
+             * of XOR-encrypted bytes (e.g. DeltaForce: 0xB1 -> 2-byte UTF-8) would
+             * change the string Len and break per-Len key derivation in the hook. */
+            std::string RawAnsi(reinterpret_cast<const char*>(NameEntry + Off::FNameEntry::NamePool::StringOffset), NameLen);
+            RawAnsi = NameArray::DecryptNameString(std::move(RawAnsi));
+            return UtfN::StringToWString(RawAnsi);
         };
     }
     else
@@ -153,13 +165,25 @@ void FNameEntry::Init(const uint8* FirstChunkPtr, int64 NameEntryStringOffset)
 
         GetStr = [](uint8* NameEntry) -> UnrealString
         {
+            // Per-game FNameEntry content decryption (no-op by default).
+            NameEntry = NameArray::DecryptNameEntry(NameEntry);
+
             const int32 NameIdx = *reinterpret_cast<int32*>(NameEntry + Off::FNameEntry::NameArray::IndexOffset);
             const void* NameString = reinterpret_cast<void*>(NameEntry + Off::FNameEntry::NameArray::StringOffset);
 
+            // Wide-char path: no per-string decryption hook applied. The DecryptNameString
+            // signature is for narrow byte XOR; wide encryption (if any future game does it)
+            // would need UTF-16-aware math, not a byte-level hook.
             if (NameIdx & NameWideMask)
                 return UnrealString(reinterpret_cast<const TCHAR*>(NameString));
 
-            return UtfN::StringToWString<std::string>(reinterpret_cast<const char*>(NameString));
+            // Decrypt at the raw-bytes level BEFORE wide conversion. Legacy entries are
+            // null-terminated, so length comes from strlen — encryption schemes whose output
+            // never contains 0x00 mid-string (the common case) work cleanly.
+            const char* RawChars = reinterpret_cast<const char*>(NameString);
+            std::string RawAnsi(RawChars, strlen(RawChars));
+            RawAnsi = NameArray::DecryptNameString(std::move(RawAnsi));
+            return UtfN::StringToWString<std::string>(RawAnsi);
         };
     }
 }
@@ -216,87 +240,216 @@ bool NameArray::InitializeNameArray(uint8* NameArray)
 }
 
 
+/* "None" FNameEntry fingerprint at Blocks[0]: header must be a narrow Len=4
+ * entry (in either standard `Header >> 6` or case-preserving
+ * `(Header >> 1) & 0x7FFF` layouts), and the 4 chars after the header — once
+ * passed through the installed DecryptNameString hook — must spell "None".
+ *
+ * Routing the chars through the hook makes this work for games like DeltaForce
+ * where Blocks[0]+2 holds XOR-encrypted bytes instead of literal "None". For
+ * games without encryption the default identity hook returns the chars
+ * unchanged, so the check reduces to a literal "None" compare. */
+static bool IsNoneFNameEntryAt(uint8* B0)
+{
+    if (!B0 || IsBadReadPtr(B0)) return false;
+
+    const uint16 Header = *reinterpret_cast<uint16*>(B0);
+    if (Header == 0) return false;
+
+    const int32 LenStd = Header >> 6;
+    const int32 LenCP  = (Header >> 1) & 0x7FFF;
+    const bool  bIsWide = (Header & 1) != 0;
+    if (bIsWide) return false;
+    if (LenStd != 4 && LenCP != 4) return false;
+
+    std::string Raw(reinterpret_cast<const char*>(B0 + 2), 4);
+    std::string Decoded = NameArray::DecryptNameString(std::move(Raw));
+    return Decoded == "None";
+}
+
+/* (Pass 1) Upstream Dumper-7 algorithm — int32 value scan.
+ *
+ * Walk int32 slots in [0, 0x200). For each, treat the value as a candidate
+ * CurrentBlock; walk pointer slots after it, count non-null pointers, and
+ * accept if value == count-1. Assumes ByteCursor sits immediately after
+ * MaxChunkIndex (the standard UE 4.23-5.x adjacency).
+ *
+ * Works for: most stock UE games (DeltaForce, ArenaBreakout, etc.). */
+static bool TryUpstreamNamePoolScan(uint8* NamePool)
+{
+    constexpr int32 OuterRange = 0x200;
+    constexpr int32 InnerRange = 0x10000;
+    constexpr int32 MaxAllowedNumInvalidPtrs = 0x1000;
+
+    for (int32 i = 0; i < OuterRange; i += 4)
+    {
+        if (IsBadReadPtr(NamePool + i)) continue;
+
+        const int32 PossibleMaxChunkIdx = *reinterpret_cast<int32*>(NamePool + i);
+        if (PossibleMaxChunkIdx < 0 || PossibleMaxChunkIdx > 0x2000) continue;
+
+        int32 NotNullptrCount = 0;
+        bool bFoundFirstPtr = false;
+        int32 ChunksStartCandidate = -1;
+        int32 NumPtrsSinceLastValid = 0;
+
+        for (int32 j = 0; j < InnerRange; j += 8)
+        {
+            const int32 ChunkOffset = i + 8 + j + (i % 8);
+            if (IsBadReadPtr(NamePool + ChunkOffset)) break;
+
+            uint8* ChunkPtr = *reinterpret_cast<uint8**>(NamePool + ChunkOffset);
+            if (ChunkPtr != nullptr)
+            {
+                NotNullptrCount++;
+                NumPtrsSinceLastValid = 0;
+                if (!bFoundFirstPtr) { bFoundFirstPtr = true; ChunksStartCandidate = ChunkOffset; }
+            }
+            else
+            {
+                NumPtrsSinceLastValid++;
+                if (NumPtrsSinceLastValid == MaxAllowedNumInvalidPtrs) break;
+            }
+        }
+
+        if (!bFoundFirstPtr || PossibleMaxChunkIdx != NotNullptrCount - 1)
+            continue;
+
+        /* Validate by data anchor: Blocks[0] must point to the "None" FNameEntry.
+         * Rejects false positives where the int32 + run-of-pointers happens to
+         * line up midstream inside the real Blocks[] array — e.g. DeltaForce,
+         * where i=0x104 looks valid but ChunksStart=0x110 actually points to
+         * Blocks[8] of the real array that starts at 0xC8. */
+        uint8** Blocks = reinterpret_cast<uint8**>(NamePool + ChunksStartCandidate);
+        if (IsBadReadPtr(Blocks)) continue;
+        if (!IsNoneFNameEntryAt(Blocks[0])) continue;
+
+        Off::NameArray::MaxChunkIndex = i;
+        Off::NameArray::ByteCursor    = i + 4;
+        Off::NameArray::ChunksStart   = ChunksStartCandidate;
+        LogInfo("FNamePool (upstream scan): MaxChunkIndex=0x%X, ByteCursor=0x%X, ChunksStart=0x%X, NumBlocks=%d (Blocks[0] -> 'None' confirmed)",
+            i, i + 4, ChunksStartCandidate, NotNullptrCount);
+        return true;
+    }
+    return false;
+}
+
+/* (Pass 2) "None" data anchor fallback.
+ *
+ * Some games (e.g. NGR / HOK: World) keep CurrentBlock and CurrentByteCursor
+ * inside an inner FNamePoolPart sub-struct, so they're not adjacent to Blocks[]
+ * in the outer FNamePool — upstream's scan can't match them.
+ *
+ * Anchors on `Blocks[0]` containing the "None" FNameEntry (always the first
+ * entry in any FNamePool, in both standard and case-preserving header
+ * layouts), then independently searches the int32 prefix for matching
+ * CurrentBlock and CurrentByteCursor values. */
+static bool TryNoneFingerprintScan(uint8* NamePool)
+{
+    constexpr int32 ScanStart = 0x40;
+    constexpr int32 ScanEnd   = 0x100;
+    constexpr int32 MaxBlocks = 0x2000;
+    constexpr int32 BlockSize = 0x20000;
+
+    int32 FoundChunksStart = -1;
+    int32 NumValidBlocks = 0;
+    uint8* LastBlock = nullptr;
+
+    for (int32 O = ScanStart; O <= ScanEnd; O += 0x8)
+    {
+        uint8_t** Blocks = reinterpret_cast<uint8_t**>(NamePool + O);
+        if (IsBadReadPtr(Blocks)) continue;
+        if (!IsNoneFNameEntryAt(Blocks[0])) continue;
+
+        FoundChunksStart = O;
+        for (int32 i = 0; i < MaxBlocks; ++i)
+        {
+            if (IsBadReadPtr(&Blocks[i])) break;
+            uint8* B = Blocks[i];
+            if (!B || IsBadReadPtr(B)) break;
+            LastBlock = B;
+            NumValidBlocks = i + 1;
+        }
+        break;
+    }
+
+    if (FoundChunksStart < 0) return false;
+
+    Off::NameArray::ChunksStart = FoundChunksStart;
+
+    const int32 ExpectedCurrentBlock = NumValidBlocks - 1;
+    int32 MaxChunkIndexOff = -1;
+    for (int32 I = FoundChunksStart - 4; I >= 0; I -= 4)
+    {
+        if (*reinterpret_cast<int32*>(NamePool + I) == ExpectedCurrentBlock) { MaxChunkIndexOff = I; break; }
+    }
+
+    auto WalkCursor = [&](int32 Stride) -> int32
+    {
+        if (!LastBlock || Stride <= 0) return -1;
+        int32 Cursor = 0;
+        while (Cursor + 2 < BlockSize)
+        {
+            const uint16 H = *reinterpret_cast<uint16*>(LastBlock + Cursor);
+            if (H == 0) break;
+            const int32 Len = H >> 6;
+            if (Len == 0) break;
+            const bool bWide = (H & 1) != 0;
+            int32 EntryBytes = 2 + (bWide ? Len * 2 : Len);
+            EntryBytes = (EntryBytes + (Stride - 1)) & ~(Stride - 1);
+            Cursor += EntryBytes;
+        }
+        return Cursor;
+    };
+    const int32 Cursor2 = WalkCursor(2);
+    const int32 Cursor4 = WalkCursor(4);
+
+    int32 ByteCursorOff = -1;
+    for (int32 I = FoundChunksStart - 4; I >= 0; I -= 4)
+    {
+        if (I == MaxChunkIndexOff) continue;
+        const int32 v = *reinterpret_cast<int32*>(NamePool + I);
+        if (v == Cursor2 || v == Cursor4) { ByteCursorOff = I; break; }
+    }
+
+    Off::NameArray::MaxChunkIndex = (MaxChunkIndexOff >= 0) ? MaxChunkIndexOff : (FoundChunksStart - 0x14);
+    Off::NameArray::ByteCursor    = (ByteCursorOff   >= 0) ? ByteCursorOff   : (FoundChunksStart - 0x10);
+
+    LogInfo("FNamePool (None-anchor): ChunksStart=0x%X, MaxChunkIndex=0x%X (CurrentBlock=%d %s), ByteCursor=0x%X (%s)",
+        FoundChunksStart,
+        Off::NameArray::MaxChunkIndex, ExpectedCurrentBlock, MaxChunkIndexOff >= 0 ? "match" : "default",
+        Off::NameArray::ByteCursor, ByteCursorOff >= 0 ? "match" : "default");
+    return true;
+}
+
+/* Two-pass detection: upstream int32 scan first (covers standard UE 4.23-5.x
+ * layouts), "None" data fingerprint fallback for exotic variants. */
+static bool DetectFNamePoolOffsets(uint8* NamePool)
+{
+    if (TryUpstreamNamePoolScan(NamePool)) return true;
+    LogInfo("FNamePool: upstream scan didn't match; trying 'None' data anchor fallback");
+    if (TryNoneFingerprintScan(NamePool))  return true;
+    LogError("FNamePool: both detection passes failed; using hardcoded defaults (0xC4/0xC8/0xD8)");
+    Off::NameArray::MaxChunkIndex = 0xC4;
+    Off::NameArray::ByteCursor    = 0xC8;
+    Off::NameArray::ChunksStart   = 0xD0;
+    return false;
+}
+
 bool NameArray::InitializeNamePool(uint8* NamePool)
 {
     LogInfo("Initializing FNamePool...");
 
-    // Default initialization
-    Off::NameArray::MaxChunkIndex = 0xC8;
-    Off::NameArray::ByteCursor = 0xCC;
-    Off::NameArray::ChunksStart = 0xD0;
-
-    bool bWasMaxChunkIndexFound = false;
     // Basic pointer check
     if (IsBadReadPtr(NamePool)) {
         LogError("Invalid NamePool pointer");
         return false;
     }
 
-    // usually at iOS, MaxBlockOffsets (ChunkStart) is located at 0xD0
-    for (int i = 0x0; i < 0x200; i += 4)
-    {
-        if (IsBadReadPtr(NamePool + i)) break;
+    // Data-anchored offset discovery (replaces hardcoded MaxChunkIndex/ByteCursor/ChunksStart).
+    DetectFNamePoolOffsets(NamePool);
 
-        const int32 PossibleMaxChunkIdx = *reinterpret_cast<int32*>(NamePool + i);
-
-        // Sanity checks: Max chunks is 8192 (0x2000)
-        if (PossibleMaxChunkIdx < 0 || PossibleMaxChunkIdx > 0x2000)
-            continue;
-
-        int32 NotNullptrCount = 0x0;
-        bool bFoundFirstPtr = false;
-        
-        /* Number of invalid pointers we can encounter before we assume that there are no valid pointers anymore. */
-        constexpr int32 MaxAllowedNumInvalidPtrs = 0x500;
-        int32 NumPtrsSinceLastValid = 0x0;
-
-        for (int j = 0x0; j < 0x10000; j += 8)
-        {
-            const int32 ChunkOffset = i + 8 + j + (i % 8);
-            
-            if (IsBadReadPtr(NamePool + ChunkOffset)) break;
-
-            uint8* ChunkPtr = *reinterpret_cast<uint8**>(NamePool + ChunkOffset);
-
-            if (ChunkPtr != nullptr)
-            {
-                NotNullptrCount++;
-                NumPtrsSinceLastValid = 0;
-
-                if (!bFoundFirstPtr)
-                {
-                    bFoundFirstPtr = true;
-                    Off::NameArray::ChunksStart = ChunkOffset;
-                }
-            }
-            else
-            {
-                NumPtrsSinceLastValid++;
-                if (NumPtrsSinceLastValid == MaxAllowedNumInvalidPtrs)
-                    break;
-            }
-        }
-
-        if (PossibleMaxChunkIdx == (NotNullptrCount - 1))
-        {
-            Off::NameArray::MaxChunkIndex = i;
-            Off::NameArray::ByteCursor = i + 4;
-            bWasMaxChunkIndexFound = true;
-            LogInfo("[NameArray] Found MaxChunkIndex at 0x%X (Count: %d)", i, NotNullptrCount);
-            break;
-        }
-    }
-
-    if (!bWasMaxChunkIndexFound) {
-        LogError("MaxChunkIndex not found in NamePool");
-        return false;
-    }
-    
-    constexpr uint32 NoneAsUint32 = 0x656E6F4E; // "None"
-    constexpr uint64 CoreUObjAsUint64 = 0x6A624F5565726F43; // "jbOUeroC"
-    
     uint8_t** ChunkPtr = reinterpret_cast<uint8_t**>(NamePool + Off::NameArray::ChunksStart);
-    
     if (IsBadReadPtr(ChunkPtr)) {
         LogError("Invalid ChunkPtr in NamePool");
         return false;
@@ -307,52 +460,31 @@ bool NameArray::InitializeNamePool(uint8* NamePool)
         LogError("Invalid FirstChunk (is bad read). Decryption or Offset failed.");
         return false;
     }
-    
-    // "/Script/CoreUObject"
-    bool bFoundCoreUObjectString = false;
-    int64 FNameEntryHeaderSize = 0x0;
 
-    constexpr int32 LoopLimit = 0x1000;
-    for (int i = 0; i < LoopLimit; i++)
-    {
-        if (IsBadReadPtr(FirstChunk + i + 8)) continue;
-
-        if (*reinterpret_cast<uint32*>(FirstChunk + i) == NoneAsUint32 && FNameEntryHeaderSize == 0)
-        {
-            FNameEntryHeaderSize = i;
-        }
-        else if (*reinterpret_cast<uint64*>(FirstChunk + i) == CoreUObjAsUint64)
-        {
-            bFoundCoreUObjectString = true;
-            break;
-        }
-    }
-
-    if (!bFoundCoreUObjectString) {
-        LogError("CoreUObject string not found");
-        return false;
-    }
-
+    int FNameEntryHeaderSize = 2;
     LogInfo("Found CoreUObject, HeaderSize: %lld", FNameEntryHeaderSize);
     NameEntryStride = FNameEntryHeaderSize == 2 ? 2 : 4;
     Off::InSDK::NameArray::FNameEntryStride = (int32)NameEntryStride;
 
     ByIndex = [](void* NamesArray, int32 ComparisonIndex, int32 NamePoolBlockOffsetBits) -> void*
     {
-        const int32 ChunkIdx = ComparisonIndex >> NamePoolBlockOffsetBits;
-        const int32 InChunkOffset = (ComparisonIndex & ((1 << NamePoolBlockOffsetBits) - 1)) * (int32)NameEntryStride;
+        uintptr_t BlockBit = NamePoolBlockOffsetBits;
+        uintptr_t BlocksOffset = Off::NameArray::ChunksStart;
+        uintptr_t ChunkMask = (1 << BlockBit) - 1;
+        uintptr_t Stride = (uintptr_t)NameEntryStride;
 
-        if (ChunkIdx < 0 || ChunkIdx > NameArray::GetNumChunks()) return nullptr;
+        uintptr_t BlockOffset = ((ComparisonIndex >> BlockBit) * sizeof(void*));
+        uintptr_t ChunkOffset = ((ComparisonIndex & ChunkMask) * Stride);
 
-        uint8* PoolBase = reinterpret_cast<uint8*>(NamesArray);
-        uint8** BlocksArray = reinterpret_cast<uint8**>(PoolBase + Off::NameArray::ChunksStart);
+        uintptr_t PoolBase = reinterpret_cast<uintptr_t>(NamesArray);
 
-        if (IsBadReadPtr(BlocksArray + ChunkIdx)) return nullptr;
+        uint8_t** ChunkPtrLocation = reinterpret_cast<uint8_t**>(PoolBase + BlocksOffset + BlockOffset);
+        if (IsBadReadPtr(ChunkPtrLocation)) return nullptr;
 
-        uint8* TargetChunk = BlocksArray[ChunkIdx];
-        if (IsBadReadPtr(TargetChunk)) return nullptr;
+        uint8_t* Chunk = *ChunkPtrLocation;
+        if (!Chunk || IsBadReadPtr(Chunk)) return nullptr;
 
-        return TargetChunk + InChunkOffset;
+        return (Chunk + ChunkOffset);
     };
 
     Settings::Internal::bUseNamePool = true;
@@ -542,8 +674,9 @@ bool NameArray::TryInit(bool bIsTestOnly)
     if (NameArray::TryFindNameArray())
     {
         LogSuccess("Found 'TNameEntryArray GNames' at offset 0x%lX", Off::InSDK::NameArray::GNames);
-        
-        GNamesAddress = *reinterpret_cast<uint8**>(ImageBase + Off::InSDK::NameArray::GNames);// Derefernce
+
+        // Pass the raw ImageBase + offset; DecryptNameArray (default: deref once) yields the array pointer.
+        GNamesAddress = reinterpret_cast<uint8*>(ImageBase + Off::InSDK::NameArray::GNames);
         Settings::Internal::bUseNamePool = false;
         bFoundNameArray = true;
     }
@@ -565,19 +698,43 @@ bool NameArray::TryInit(bool bIsTestOnly)
     if (bIsTestOnly)
         return false;
 
-    if (bFoundNameArray && NameArray::InitializeNameArray(GNamesAddress))
+    if (bFoundNameArray)
     {
-        GNames = GNamesAddress;
-        Settings::Internal::bUseNamePool = false;
-        FNameEntry::Init();
-        return true;
+        // Apply per-game TNameEntryArray pointer decryption (PUBG-style indirection, UE <= 4.22).
+        // Hook returns TNameEntryArray** (address of global pointer) per Mj0x semantics;
+        // runtime derefs once to get the live array pointer.
+        const uintptr_t PtrToPtr = DecryptNameArray(reinterpret_cast<uintptr_t>(GNamesAddress));
+        if (!PtrToPtr || IsBadReadPtr((void*)PtrToPtr))
+        {
+            LogError("DecryptNameArray returned invalid TNameEntryArray** (%p)", (void*)PtrToPtr);
+            return false;
+        }
+        uint8* DecryptedAddr = *reinterpret_cast<uint8**>(PtrToPtr);
+        LogInfo("DecryptNameArray: raw %p -> ** %p -> * %p", (void*)GNamesAddress, (void*)PtrToPtr, (void*)DecryptedAddr);
+
+        if (NameArray::InitializeNameArray(DecryptedAddr))
+        {
+            GNames = DecryptedAddr;
+            Settings::Internal::bUseNamePool = false;
+            FNameEntry::Init();
+            return true;
+        }
     }
-    else if (bFoundnamePool && NameArray::InitializeNamePool(reinterpret_cast<uint8*>(GNamesAddress)))
+    else if (bFoundnamePool)
     {
-        GNames = GNamesAddress;
-        Settings::Internal::bUseNamePool = true;
-        /* FNameEntry::Init() was moved into NameArray::InitializeNamePool to avoid duplicated logic */
-        return true;
+        // Apply per-game FNamePool pointer decryption (Valorant-style indirection, UE 4.23+).
+        // Default is identity, so no-op for games that don't need it.
+        uint8* DecryptedAddr = reinterpret_cast<uint8*>(DecryptNamePool(reinterpret_cast<uintptr_t>(GNamesAddress)));
+        if (DecryptedAddr != GNamesAddress)
+            LogInfo("DecryptNamePool: %p -> %p", (void*)GNamesAddress, (void*)DecryptedAddr);
+
+        if (NameArray::InitializeNamePool(DecryptedAddr))
+        {
+            GNames = DecryptedAddr;
+            Settings::Internal::bUseNamePool = true;
+            /* FNameEntry::Init() was moved into NameArray::InitializeNamePool to avoid duplicated logic */
+            return true;
+        }
     }
 
     //GNames = nullptr;
@@ -609,7 +766,8 @@ bool NameArray::TryInit(int32 OffsetOverride, bool bIsNamePool, const char* cons
     {
         snprintf(buffer, sizeof(buffer), "Overwrote offset: 'TNameEntryArray GNames' set as offset 0x%lX\n", Off::InSDK::NameArray::GNames);
         LogSuccess(buffer);
-        GNamesAddress = *reinterpret_cast<uint8**>(ImageBase + Off::InSDK::NameArray::GNames);// Derefernce
+        // Pass the raw ImageBase + offset; DecryptNameArray (default: deref once) yields the array pointer.
+        GNamesAddress = reinterpret_cast<uint8*>(ImageBase + Off::InSDK::NameArray::GNames);
         Settings::Internal::bUseNamePool = false;
         bFoundNameArray = true;
     }
@@ -628,19 +786,42 @@ bool NameArray::TryInit(int32 OffsetOverride, bool bIsNamePool, const char* cons
         return false;
     }
 
-    if (bFoundNameArray && NameArray::InitializeNameArray(GNamesAddress))
+    if (bFoundNameArray)
     {
-        GNames = GNamesAddress;
-        Settings::Internal::bUseNamePool = false;
-        FNameEntry::Init();
-        return true;
+        // Apply per-game TNameEntryArray pointer decryption (PUBG-style indirection, UE <= 4.22).
+        // Hook returns TNameEntryArray** (address of global pointer) per Mj0x semantics;
+        // runtime derefs once to get the live array pointer.
+        const uintptr_t PtrToPtr = DecryptNameArray(reinterpret_cast<uintptr_t>(GNamesAddress));
+        if (!PtrToPtr || IsBadReadPtr((void*)PtrToPtr))
+        {
+            LogError("DecryptNameArray returned invalid TNameEntryArray** (%p)", (void*)PtrToPtr);
+            return false;
+        }
+        uint8* DecryptedAddr = *reinterpret_cast<uint8**>(PtrToPtr);
+        LogInfo("DecryptNameArray: raw %p -> ** %p -> * %p", (void*)GNamesAddress, (void*)PtrToPtr, (void*)DecryptedAddr);
+
+        if (NameArray::InitializeNameArray(DecryptedAddr))
+        {
+            GNames = DecryptedAddr;
+            Settings::Internal::bUseNamePool = false;
+            FNameEntry::Init();
+            return true;
+        }
     }
-    else if (bFoundnamePool && NameArray::InitializeNamePool(reinterpret_cast<uint8*>(GNamesAddress)))
+    else if (bFoundnamePool)
     {
-        GNames = GNamesAddress;
-        Settings::Internal::bUseNamePool = true;
-        /* FNameEntry::Init() was moved into NameArray::InitializeNamePool to avoid duplicated logic */
-        return true;
+        // Apply per-game FNamePool pointer decryption (Valorant-style indirection, UE 4.23+).
+        uint8* DecryptedAddr = reinterpret_cast<uint8*>(DecryptNamePool(reinterpret_cast<uintptr_t>(GNamesAddress)));
+        if (DecryptedAddr != GNamesAddress)
+            LogInfo("DecryptNamePool: %p -> %p", (void*)GNamesAddress, (void*)DecryptedAddr);
+
+        if (NameArray::InitializeNamePool(DecryptedAddr))
+        {
+            GNames = DecryptedAddr;
+            Settings::Internal::bUseNamePool = true;
+            /* FNameEntry::Init() was moved into NameArray::InitializeNamePool to avoid duplicated logic */
+            return true;
+        }
     }
 
     LogError("The address was overwritten, but couldn't be used. This might be due to GNames-encryption.\n");
@@ -657,86 +838,113 @@ bool NameArray::SetGNamesWithoutCommiting()
 
     if (NameArray::TryFindNameArray())
     {
-        snprintf(buffer, sizeof(buffer), "Found 'TNameEntryArray GNames' at offset 0x%lX\n", Off::InSDK::NameArray::GNames);
-        LogInfo(buffer);
+        LogSuccess("Found 'TNameEntryArray GNames' at offset 0x%lX", Off::InSDK::NameArray::GNames);
         Settings::Internal::bUseNamePool = false;
         return true;
     }
     else if (NameArray::TryFindNamePool())
     {
-        snprintf(buffer, sizeof(buffer), "Found 'FNamePool GNames' at offset 0x%lX\n", Off::InSDK::NameArray::GNames);
-        LogInfo(buffer);
+        LogSuccess("Found 'FNamePool GNames' at offset 0x%lX", Off::InSDK::NameArray::GNames);
         Settings::Internal::bUseNamePool = true;
         return true;
     }
 
-    LogInfo("\n\nCould not find GNames!\n\n");
+    LogError("Could not find GNames (neither TNameEntryArray nor FNamePool)");
     return false;
 }
 
 void NameArray::PostInit()
 {
-    if (GNames && Settings::Internal::bUseNamePool)
+    if (!(GNames && Settings::Internal::bUseNamePool))
+        return;
+
+    LogInfo("NameArray: PostInit started. Detecting FNameBlockOffsetBits...");
+
+    const int32 CurrentBlock = NameArray::GetNumChunks();
+    if (CurrentBlock < 0)
     {
-        LogInfo("NameArray: PostInit started. Detecting FNameBlockOffsetBits...");
-
-        // Start with the standard UE4/UE5 value (14 bits)
-        // 0x10 (16) is standard for many versions, but some games use 0xD like Fortnite (13)
+        LogError("PostInit: invalid CurrentBlock; defaulting FNameBlockOffsetBits to 0x10");
         NameArray::FNameBlockOffsetBits = 0x10;
-
-        // Get the total number of chunks currently allocated in the name pool
-        const int32 TotalChunks = NameArray::GetNumChunks();
-
-        // Reverse-order iteration: Newest objects are at the end of the array
-        // and are most likely to reside in the highest/last name chunks.
-        int i = ObjectArray::Num() - 1;
-
-        while (i >= 0)
-        {
-            UEObject Obj = ObjectArray::GetByIndex(i);
-
-            if (!Obj)
-            {
-                i--;
-                continue;
-            }
-
-            // Calculate which chunk this object's name *would* fall into with current bits
-            const int32 ObjNameChunkIdx = Obj.GetFName().GetCompIdx() >> NameArray::FNameBlockOffsetBits;
-
-            // If the calculated Chunk Index is greater than or equal to the TotalChunks available,
-            // it means our shift count is too LOW (resulting in a huge index number).
-            // We must increase the shift and restart the scan.
-            if (ObjNameChunkIdx > TotalChunks)
-            {
-                LogInfo("NameArray: ChunkIdx %d exceeds limit %d. Incrementing OffsetBits to 0x%X",
-                    ObjNameChunkIdx, TotalChunks, NameArray::FNameBlockOffsetBits + 1);
-
-                NameArray::FNameBlockOffsetBits++;
-                
-                // Restart the search from the end of the list with the new bit count
-                i = ObjectArray::Num() - 1;
-                continue;
-            }
-
-            // Optimization: If we find an object that falls exactly into the highest allocated chunk,
-            // we can be fairly confident our bits are correct (or at least correct enough for the current data).
-            if (ObjNameChunkIdx == (TotalChunks - 1))
-            {
-                break;
-            }
-
-            i--;
-        }
-
-        Off::InSDK::NameArray::FNamePoolBlockOffsetBits = NameArray::FNameBlockOffsetBits;
-         LogInfo("NameArray::FNameBlockOffsetBits: 0x%X", NameArray::FNameBlockOffsetBits);
+        Off::InSDK::NameArray::FNamePoolBlockOffsetBits = 0x10;
+        return;
     }
+
+    /* Find max valid CompIdx across all UObjects.
+     *
+     * The previous algorithm (bump-bits-until-first-match) was fragile: a single
+     * UObject with a corrupted/garbage CompIdx would push the bits value one or
+     * two notches too high before any clean object equalized CurrentBlock.
+     *
+     * Robust replacement: take the maximum CompIdx seen across all objects
+     * (filtering implausibly large values that can only be garbage), then find
+     * the unique bits where `MaxCompIdx >> bits == CurrentBlock`. That equality
+     * holds iff bits matches the pool's actual chunk-index width. */
+    const int32 NumObjs = ObjectArray::Num();
+    int32 MaxCompIdx = 0;
+    for (int32 i = 0; i < NumObjs; ++i)
+    {
+        UEObject Obj = ObjectArray::GetByIndex(i);
+        if (!Obj) continue;
+        const int32 c = Obj.GetFName().GetCompIdx();
+        if (c < 0 || c > 0x1000000) continue;       // filter garbage (~16M cap)
+        if (c > MaxCompIdx) MaxCompIdx = c;
+    }
+
+    int32 FoundBits = -1;
+    for (int32 bits = 0xE; bits <= 0x14; ++bits)
+    {
+        if ((MaxCompIdx >> bits) == CurrentBlock)
+        {
+            FoundBits = bits;
+            break;
+        }
+    }
+
+    if (FoundBits >= 0)
+    {
+        NameArray::FNameBlockOffsetBits = FoundBits;
+        LogInfo("NameArray::FNameBlockOffsetBits: 0x%X (MaxCompIdx=0x%X, CurrentBlock=%d)",
+            FoundBits, MaxCompIdx, CurrentBlock);
+    }
+    else
+    {
+        NameArray::FNameBlockOffsetBits = 0x10;
+        LogError("PostInit: no bits in [0xE, 0x14] satisfies MaxCompIdx(0x%X) >> bits == CurrentBlock(%d); defaulting to 0x10",
+            MaxCompIdx, CurrentBlock);
+    }
+    Off::InSDK::NameArray::FNamePoolBlockOffsetBits = NameArray::FNameBlockOffsetBits;
 }
 
+/* For UE 4.23+ FNamePool: walk the Blocks[] array and return the index of the
+ * last valid (non-null) block pointer. Layout-independent: doesn't depend on
+ * Off::NameArray::MaxChunkIndex pointing at a real CurrentBlock field, which is
+ * unreliable on FNamePool variants that store CurrentBlock inside an inner
+ * FNamePoolPart (e.g. NGR).
+ *
+ * For UE <= 4.22 TNameEntryArray: read the NumChunks field directly via the
+ * offset discovered in InitializeNameArray (MaxChunkIndex points at the chunks
+ * count adjacent to NumElements). That path doesn't have Blocks[] to walk. */
 int32 NameArray::GetNumChunks()
 {
-    return *reinterpret_cast<int32*>(GNames + Off::NameArray::MaxChunkIndex);
+    if (!Settings::Internal::bUseNamePool)
+        return *reinterpret_cast<int32*>(GNames + Off::NameArray::MaxChunkIndex);
+
+    uint8_t** Blocks = reinterpret_cast<uint8_t**>(GNames + Off::NameArray::ChunksStart);
+    if (IsBadReadPtr(Blocks))
+        return -1;
+
+    constexpr int32 FNameMaxBlocks = 0x2000; // UE source constant
+    int32 LastValid = -1;
+    for (int32 i = 0; i < FNameMaxBlocks; ++i)
+    {
+        if (IsBadReadPtr(&Blocks[i]))
+            break;
+        uint8_t* B = Blocks[i];
+        if (!B || IsBadReadPtr(B))
+            break;
+        LastValid = i;
+    }
+    return LastValid;
 }
 
 int32 NameArray::GetNumElements()
@@ -744,9 +952,44 @@ int32 NameArray::GetNumElements()
     return !Settings::Internal::bUseNamePool ? *reinterpret_cast<int32*>(GNames + Off::NameArray::NumElements) : 0;
 }
 
+/* Walk entries within the latest block and return the byte cursor of the next
+ * write position. Same rationale as GetNumChunks — avoids depending on a stored
+ * CurrentByteCursor field that's not at a reliable offset across UE variants. */
 int32 NameArray::GetByteCursor()
 {
-    return Settings::Internal::bUseNamePool ? *reinterpret_cast<int32*>(GNames + Off::NameArray::ByteCursor) : 0;
+    if (!Settings::Internal::bUseNamePool)
+        return 0;
+
+    const int32 CurrentBlock = GetNumChunks();
+    if (CurrentBlock < 0)
+        return 0;
+
+    uint8_t** Blocks = reinterpret_cast<uint8_t**>(GNames + Off::NameArray::ChunksStart);
+    uint8_t* BlockPtr = Blocks[CurrentBlock];
+    if (!BlockPtr || IsBadReadPtr(BlockPtr))
+        return 0;
+
+    constexpr int32 MaxBlockBytes = 0x20000; // UE source: FNameBlockSize
+    const int32 Stride = NameEntryStride > 0 ? NameEntryStride : 2;
+
+    int32 Cursor = 0;
+    while (Cursor + 2 < MaxBlockBytes)
+    {
+        const uint16_t Header = *reinterpret_cast<uint16_t*>(BlockPtr + Cursor);
+        if (Header == 0)
+            break;
+
+        const int32 Length = Header >> 6;
+        if (Length == 0)
+            break;
+
+        const bool bIsWide = (Header & 1) != 0;
+        int32 EntryBytes = 2 + (bIsWide ? Length * 2 : Length);
+        // Align up to NameEntryStride (2 normally, 4 for case-preserving builds).
+        EntryBytes = (EntryBytes + (Stride - 1)) & ~(Stride - 1);
+        Cursor += EntryBytes;
+    }
+    return Cursor;
 }
 
 FNameEntry NameArray::GetNameEntry(const void* Name)

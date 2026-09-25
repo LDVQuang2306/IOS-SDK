@@ -7,8 +7,8 @@
 #include <string>
 #include <algorithm>
 #include <array>
-#include <cassert>
 
+#include <cassert>
 
 typedef int8_t int8;
 typedef int16_t int16;
@@ -19,44 +19,30 @@ typedef uint8_t uint8;
 typedef uint16_t uint16;
 typedef uint32_t uint32;
 typedef uint64_t uint64;
+
 typedef uintptr_t uintptr;
 
 
-template<typename T>
-constexpr T Align(T Size, T Alignment)
-{
-	static_assert(std::is_integral_v<T>, "Align can only hanlde integral types!");
-	assert(Alignment != 0 && "Alignment was 0, division by zero exception.");
-
-	const T RequiredAlign = Alignment - (Size % Alignment);
-
-	return Size + (RequiredAlign != Alignment ? RequiredAlign : 0x0);
+#define ENUM_OPERATORS(EEnumClass)                                                                                              \
+                                                                                                                                \
+inline constexpr EEnumClass operator|(EEnumClass Left, EEnumClass Right)                                                        \
+{                                                                                                                               \
+	using UnderlyingType = std::underlying_type<EEnumClass>::type;                                                              \
+	return static_cast<EEnumClass>(static_cast<UnderlyingType>(Left) | static_cast<UnderlyingType>(Right));                     \
+}                                                                                                                               \
+                                                                                                                                \
+inline constexpr EEnumClass& operator|=(EEnumClass& Left, EEnumClass Right)                                                     \
+{                                                                                                                               \
+	Left = Left | Right;                                                                                                        \
+	return Left;                                                                                                                \
+}                                                                                                                               \
+                                                                                                                                \
+inline constexpr bool operator&(EEnumClass Left, EEnumClass Right)                                                              \
+{                                                                                                                               \
+	using UnderlyingType = std::underlying_type<EEnumClass>::type;                                                              \
+	return (static_cast<UnderlyingType>(Left) & static_cast<UnderlyingType>(Right)) == static_cast<UnderlyingType>(Right);      \
 }
 
-
-#define ENUM_OPERATORS(EEnumClass)                                                                                                                    \
-                                                                                                                                                         \
-inline constexpr EEnumClass operator|(EEnumClass Left, EEnumClass Right)                                                                                 \
-{                                                                                                                                                        \
-    return static_cast<EEnumClass>(                                                                                                                      \
-        static_cast<std::underlying_type<EEnumClass>::type>(Left) |                                                                                      \
-        static_cast<std::underlying_type<EEnumClass>::type>(Right));                                                                                     \
-}                                                                                                                                                        \
-                                                                                                                                                         \
-inline constexpr EEnumClass& operator|=(EEnumClass& Left, EEnumClass Right)                                                                              \
-{                                                                                                                                                        \
-    Left = static_cast<EEnumClass>(                                                                                                                      \
-        static_cast<std::underlying_type<EEnumClass>::type>(Left) |                                                                                      \
-        static_cast<std::underlying_type<EEnumClass>::type>(Right));                                                                                     \
-    return Left;                                                                                                                                         \
-}                                                                                                                                                        \
-                                                                                                                                                         \
-inline constexpr bool operator&(EEnumClass Left, EEnumClass Right)                                                                                       \
-{                                                                                                                                                        \
-    return (static_cast<std::underlying_type<EEnumClass>::type>(Left) &                                                                                  \
-            static_cast<std::underlying_type<EEnumClass>::type>(Right)) ==                                                                               \
-    static_cast<std::underlying_type<EEnumClass>::type>(Right);                                                                                          \
-}
 
 enum class EPropertyFlags : uint64
 {
@@ -118,6 +104,11 @@ enum class EPropertyFlags : uint64
 	NativeAccessSpecifierProtected	= 0x0020000000000000,
 	NativeAccessSpecifierPrivate	= 0x0040000000000000,	
 	SkipSerialization				= 0x0080000000000000, 
+	TObjectPtr						= 0x0100000000000000,
+	ExperimentalOverridableLogic	= 0x0200000000000000,
+	ExperimentalAlwaysOverriden		= 0x0400000000000000,
+	ExperimentalNeverOverriden		= 0x0800000000000000,
+	AllowSelfReference				= 0x1000000000000000,
 };
 
 enum class EFunctionFlags : uint32
@@ -158,7 +149,7 @@ enum class EFunctionFlags : uint32
 	AllFlags = 0xFFFFFFFF,
 };
 
-enum class EObjectFlags
+enum class EObjectFlags : uint32
 {
 	NoFlags							= 0x00000000,
 
@@ -286,14 +277,19 @@ enum class EClassCastFlags : uint64
 	MulticastInlineDelegateProperty     = 0x0004000000000000,
 	MulticastSparseDelegateProperty		= 0x0008000000000000,
 	FieldPathProperty					= 0x0010000000000000,
+	// Removed							= 0x0200000000000000,
+	// Removed							= 0x0400000000000000,
 	LargeWorldCoordinatesRealProperty	= 0x0080000000000000,
 	OptionalProperty					= 0x0100000000000000,
 	VValueProperty						= 0x0200000000000000,
 	VerseVMClass						= 0x0400000000000000,
 	VRestValueProperty					= 0x0800000000000000,
+	Utf8StrProperty						= 0x1000000000000000,
+	AnsiStrProperty						= 0x2000000000000000,
+	VCellProperty						= 0x4000000000000000,
 };
 
-enum class EClassFlags : uint64
+enum class EClassFlags : uint32
 {
 	None						= 0x00000000u,
 	Abstract					= 0x00000001u,
@@ -360,7 +356,16 @@ enum class EMappingsTypeFlags : uint8
 	SetProperty,
 	EnumProperty,
 	FieldPathProperty,
-	OptionalProperty,
+	OptionalProperty, // Last property for which support was added
+	Utf8StrProperty,
+	AnsiStrProperty,
+
+	ClassProperty,
+	MulticastInlineDelegateProperty,
+	SoftClassProperty,
+	VerseStringProperty,
+	VerseDynamicProperty,
+	VerseFunctionProperty,
 
 	Unknown = 0xFF
 };
@@ -487,6 +492,11 @@ static std::string StringifyPropertyFlags(EPropertyFlags PropertyFlags)
 	if (PropertyFlags & EPropertyFlags::NativeAccessSpecifierPublic) { RetFlags += "NativeAccessSpecifierPublic, "; }
 	if (PropertyFlags & EPropertyFlags::NativeAccessSpecifierProtected) { RetFlags += "NativeAccessSpecifierProtected, "; }
 	if (PropertyFlags & EPropertyFlags::NativeAccessSpecifierPrivate) { RetFlags += "NativeAccessSpecifierPrivate, "; }
+	if (PropertyFlags & EPropertyFlags::TObjectPtr) { RetFlags += "TObjectPtr, "; }
+	if (PropertyFlags & EPropertyFlags::ExperimentalOverridableLogic) { RetFlags += "ExperimentalOverridableLogic, "; }
+	if (PropertyFlags & EPropertyFlags::ExperimentalAlwaysOverriden) { RetFlags += "ExperimentalAlwaysOverriden, "; }
+	if (PropertyFlags & EPropertyFlags::ExperimentalNeverOverriden) { RetFlags += "ExperimentalNeverOverriden, "; }
+	if (PropertyFlags & EPropertyFlags::AllowSelfReference) { RetFlags += "AllowSelfReference, "; }
 
 	return RetFlags.size() > 2 ? RetFlags.erase(RetFlags.size() - 2) : RetFlags;
 }

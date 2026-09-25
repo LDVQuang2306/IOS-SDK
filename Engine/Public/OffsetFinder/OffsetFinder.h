@@ -1,88 +1,80 @@
 #pragma once
 
+#include <format.h>
 #include <vector>
 
-#include "../Unreal/ObjectArray.h"
-#include "../../../Menu/Logger.h"
+#include "Unreal/ObjectArray.h"
 
+#include "Platform.h"
+
+#include "Menu/Logger.h"
 namespace OffsetFinder
 {
-    constexpr int32 OffsetNotFound = -1;
-    template<int Alignement = 4, typename T>
-    inline int32_t FindOffset(const std::vector<std::pair<void*, T>>& ObjectValuePair, int MinOffset = 0x28, int MaxOffset = 0x1A0)
-    {
+	constexpr int32 OffsetNotFound = -1;
+	constexpr int32 OffsetFinderMinValue = Platform::Is32Bit() ? 0x18 : 0x28;
 
-        int32_t HighestFoundOffset = MinOffset;
-        for (int i = 0; i < ObjectValuePair.size(); i++)
-        {
-            if (ObjectValuePair[i].first == nullptr)
-                continue;
+	template<int Alignement = 4, typename T>
+	inline int32_t FindOffset(const std::vector<std::pair<void*, T>>& ObjectValuePair, int MinOffset = OffsetFinderMinValue, int MaxOffset = 0x1A0)
+	{
+		int32_t HighestFoundOffset = MinOffset;
+		bool bFoundOffset = false;
 
-            for (int j = HighestFoundOffset; j < MaxOffset; j += Alignement)
-            {
-                uintptr_t Address = reinterpret_cast<uintptr_t>(ObjectValuePair[i].first) + j;
-                if (IsBadReadPtr((void*)Address))
-                    continue;
-                
-                const T TypedValueAtOffset = *reinterpret_cast<T*>(Address);
-                if (TypedValueAtOffset == ObjectValuePair[i].second && j >= HighestFoundOffset)
-                {
-                    if (j > HighestFoundOffset)
-                    {
-                        HighestFoundOffset = j;
-                        i = -1;
-                    }
-                    j = MaxOffset; // Break inner loop to move to next object
-                }
-            }
-        }
+		for (int i = 0; i < ObjectValuePair.size(); i++)
+		{
+			if (ObjectValuePair[i].first == nullptr)
+			{
+				LogError("%s", fmt::format("Dumper-7 ERROR: FindOffset is skipping ObjectValuePair[{}] because .first is nullptr.", i).c_str());
+				continue;
+			}
 
-        if (HighestFoundOffset != MinOffset)
-            return HighestFoundOffset;
-        
-        return OffsetNotFound;
-    }
+			for (int j = HighestFoundOffset; j < MaxOffset; j += Alignement)
+			{
+				const T TypedValueAtOffset = *reinterpret_cast<T*>(static_cast<uint8_t*>(ObjectValuePair[i].first) + j);
 
-    template<bool bCheckForVft = true>
-    inline int32_t GetValidPointerOffset(const uint8_t* ObjA, const uint8_t* ObjB, int32_t StartingOffset, int32_t MaxOffset)
-    {
-        
-        if (IsBadReadPtr(ObjA) || IsBadReadPtr(ObjB))
-            return OffsetNotFound;
-        
-        for (int j = StartingOffset; j <= MaxOffset; j += sizeof(void*))
-        {
-            // Calculate the address of the member variable
-            uintptr_t MemberAddrA = (uintptr_t)(ObjA + j);
-            uintptr_t MemberAddrB = (uintptr_t)(ObjB + j);
+				if (TypedValueAtOffset == ObjectValuePair[i].second && j >= HighestFoundOffset)
+				{
+					bFoundOffset = true;
 
-            if (IsBadReadPtr((void*)MemberAddrA) || IsBadReadPtr((void*)MemberAddrB))
-                continue;
+					if (j > HighestFoundOffset)
+					{
+						HighestFoundOffset = j;
+						i = 0;
+					}
+					j = MaxOffset;
+				}
+			}
+		}
 
-            // We use a void* here because we are looking for pointers
-            void* PtrA = *reinterpret_cast<void**>(MemberAddrA);
-            void* PtrB = *reinterpret_cast<void**>(MemberAddrB);
+		//return HighestFoundOffset != MinOffset ? HighestFoundOffset : OffsetNotFound;
+		return bFoundOffset ? HighestFoundOffset : OffsetNotFound;
+	}
 
+	template<bool bCheckForVft = true>
+	inline int32_t GetValidPointerOffset(const void* PtrObjA, const void* PtrObjB, int32_t StartingOffset, int32_t MaxOffset, bool bNeedsToBeInProcessMemory = false)
+	{
+		const uint8_t* ObjA = static_cast<const uint8_t*>(PtrObjA);
+		const uint8_t* ObjB = static_cast<const uint8_t*>(PtrObjB);
 
-            if (IsBadReadPtr(PtrA) || IsBadReadPtr(PtrB))
-                continue;
+		if (Platform::IsBadReadPtr(ObjA) || Platform::IsBadReadPtr(ObjB))
+			return OffsetNotFound;
 
-            // Check for VTable (Dereference the pointer we just found)
-            if constexpr (bCheckForVft)
-            {
-                // Validate if PtrA/PtrB points to readable memory (VTable pointer)
-                // Note: We already checked IsBadReadPtr(PtrA) above, so we can safely read *PtrA
-                void* VTableA = *reinterpret_cast<void**>(PtrA);
-                void* VTableB = *reinterpret_cast<void**>(PtrB);
+		for (int j = StartingOffset; j <= MaxOffset; j += sizeof(void*))
+		{
+			const bool bIsAValid = !Platform::IsBadReadPtr(*reinterpret_cast<void* const*>(ObjA + j)) && (bCheckForVft ? !Platform::IsBadReadPtr(**reinterpret_cast<void** const*>(ObjA + j)) : true);
+			const bool bIsBValid = !Platform::IsBadReadPtr(*reinterpret_cast<void* const*>(ObjB + j)) && (bCheckForVft ? !Platform::IsBadReadPtr(**reinterpret_cast<void** const*>(ObjB + j)) : true);
 
-                if (IsBadReadPtr(VTableA) || IsBadReadPtr(VTableB))
-                    continue;
-            }
-            
-            return j;
-        }
-        return OffsetNotFound;
-    };
+			if (bNeedsToBeInProcessMemory)
+			{
+				if (!Platform::IsAddressInProcessRange(*reinterpret_cast<void* const*>(ObjA + j)) || !Platform::IsAddressInProcessRange(*reinterpret_cast<void* const*>(ObjB + j)))
+					continue;
+			}
+
+			if (bIsAValid && bIsBValid)
+				return j;
+		}
+
+		return OffsetNotFound;
+	};
 
 	/* UObject */
 	int32_t FindUObjectFlagsOffset();
@@ -100,8 +92,13 @@ namespace OffsetFinder
 
 	/* FField */
 	int32_t FindFFieldNextOffset();
-
 	int32_t FindFFieldNameOffset();
+	int32_t NewFindFFieldNameOffset();
+	int32_t FindFFieldClassOffset();
+	int32_t FindFFieldEditorOnlyMetaDataOffset();
+
+	/* FFieldClass */
+	int32_t FindFieldClassCastFlagsOffset();
 
 	/* UEnum */
 	int32_t FindEnumNamesOffset();
@@ -112,6 +109,7 @@ namespace OffsetFinder
 	int32_t FindChildPropertiesOffset();
 	int32_t FindStructSizeOffset();
 	int32_t FindMinAlignmentOffset();
+	int32_t FindStructBaseChainOffset();
 
 	/* UFunction */
 	int32_t FindFunctionFlagsOffset();
@@ -130,6 +128,21 @@ namespace OffsetFinder
 
 	/* BoolProperty */
 	int32_t FindBoolPropertyBaseOffset();
+
+	/* ObjectProperty */
+	int32_t FindObjectPropertyClassOffset();
+
+	/* EnumProperty */
+	int32_t FindEnumPropertyBaseOffset();
+	
+	/* ByteProperty */
+	int32_t FindBytePropertyEnumOffset();
+
+	/* StructProperty */
+	int32_t FindStructPropertyStructOffset();
+
+	/* DelegateProperty */
+	int32_t FindDelegatePropertySignatureFunctionOffset();
 
 	/* ArrayProperty */
 	int32_t FindInnerTypeOffset(const int32 PropertySize);

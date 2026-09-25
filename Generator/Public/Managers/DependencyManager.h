@@ -3,10 +3,10 @@
 #include <unordered_set>
 #include <unordered_map>
 #include <iostream>
-#include <format>
+#include <format.h>
 #include <functional>
 
-#include "../../../Engine/Public/Unreal/Enums.h"
+#include "Unreal/Enums.h"
 
 
 class DependencyManager

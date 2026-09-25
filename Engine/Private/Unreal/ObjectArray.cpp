@@ -1,15 +1,14 @@
 
 #include <iostream>
 #include <fstream>
-#include <format>
+#include <format.h>
 #include <filesystem>
 #include <unistd.h>
-#include <format.h>
 
-#include "../../Public/Unreal/ObjectArray.h"
-#include "../../Public/OffsetFinder/Offsets.h"
-#include "../../../Utils/Utils.h"
-#include "../../../Menu/Logger.h"
+#include "Unreal/ObjectArray.h"
+#include "OffsetFinder/Offsets.h"
+#include "Utils.h"
+#include "Menu/Logger.h"
 
 
 namespace fs = std::filesystem;
@@ -46,9 +45,9 @@ constexpr inline std::array FChunkedFixedUObjectArrayLayouts =
 	{
 		.ObjectsOffset = 0x20,
 		.MaxElementsOffset = 0x10,
-		.NumElementsOffset = 0x14,
+		.NumElementsOffset = 0x4,
 		.MaxChunksOffset = 0x0,
-		.NumChunksOffset = 0x18,
+		.NumChunksOffset = 0x14,
 	},
 	FChunkedFixedUObjectArrayLayout // Mutliversus
 	{
@@ -57,7 +56,7 @@ constexpr inline std::array FChunkedFixedUObjectArrayLayouts =
 		.NumElementsOffset = 0x00, // first
 		.MaxChunksOffset = 0x14,
 		.NumChunksOffset = 0x20,
-	}
+	},
 };
 
 bool IsAddressValidGObjects(const uintptr Address, const FFixedUObjectArrayLayout& Layout)
@@ -230,7 +229,7 @@ void ObjectArray::Init(bool bScanAllMemory, const char* const ModuleName)
     if (!bScanAllMemory)
         LogInfo("\nDumper-7 by me, you & him\n\n\n");
 
-    const auto [ImageBase, ImageSize, Header] = GetImageBaseAndSize(ModuleName);
+    const auto [ImageBase, ImageSize, Header, Slide] = GetImageBaseAndSize(ModuleName);
 
     uintptr SearchBase = ImageBase;
     uintptr SearchRange = ImageSize;
@@ -433,6 +432,9 @@ void ObjectArray::DumpObjects(const fs::path& Path, bool bWithPathname)
 
 	for (auto Object : ObjectArray())
 	{
+        if (!Object.GetAddress())
+            continue;
+        
 		if (!bWithPathname)
 		{
 			DumpStream << fmt::format("[{:08X}] {{{}}} {}\n", Object.GetIndex(), Object.GetAddress(), Object.GetFullName());
@@ -459,6 +461,8 @@ void ObjectArray::DumpObjectsWithProperties(const fs::path& Path, bool bWithPath
 
 	for (auto Object : ObjectArray())
 	{
+        if (!Object.GetAddress())
+            continue;
 		if (!bWithPathname)
 		{
 			DumpStream << fmt::format("[{:08X}] {{{}}} {}\n", Object.GetIndex(), Object.GetAddress(), Object.GetFullName());
@@ -498,6 +502,9 @@ UEType ObjectArray::FindObject(const std::string& FullName, EClassCastFlags Requ
 {
 	for (UEObject Object : ObjectArray())
 	{
+        if (!Object.GetAddress())
+            continue;
+        
 		if (Object.IsA(RequiredType) && Object.GetFullName() == FullName)
 		{
 			return Object.Cast<UEType>();
@@ -512,14 +519,29 @@ UEType ObjectArray::FindObjectFast(const std::string& Name, EClassCastFlags Requ
 {
 	auto ObjArray = ObjectArray();
 
+	const int32 Total = ObjectArray::Num();
+	int32 i = 0;
+
 	for (UEObject Object : ObjArray)
 	{
+		// Progress heartbeat so a slow / stuck scan is visible in the console
+		if ((i & 0xFFFF) == 0 && i > 0)
+			LogInfo("FindObjectFast(\"%s\"): scanned %d / %d", Name.c_str(), i, Total);
+		i++;
+
+		// Skip objects whose UObject* pointer or class read would fault
+		const void* Addr = Object.GetAddress();
+		if (!Addr || IsBadReadPtr(Addr))
+			continue;
+
 		if (Object.IsA(RequiredType) && Object.GetName() == Name)
 		{
+			LogSuccess("FindObjectFast(\"%s\"): found at index %d", Name.c_str(), i - 1);
 			return Object.Cast<UEType>();
 		}
 	}
 
+	LogError("FindObjectFast(\"%s\"): not found after scanning %d objects", Name.c_str(), Total);
 	return UEType();
 }
 
@@ -594,7 +616,7 @@ ObjectArray::ObjectsIterator& ObjectArray::ObjectsIterator::operator++()
 	return *this;
 }
 
-bool ObjectArray::ObjectsIterator::operator!=(const ObjectsIterator& Other)
+bool ObjectArray::ObjectsIterator::operator!=(const ObjectsIterator& Other) const
 {
 	return CurrentIndex != Other.CurrentIndex;
 }
@@ -605,17 +627,21 @@ int32 ObjectArray::ObjectsIterator::GetIndex() const
 }
 
 /*
-
+* The compiler won't generate functions for a specific template type unless it's used in the .cpp file corresponding to the
+* header it was declatred in.
+*
 * See https://stackoverflow.com/questions/456713/why-do-i-get-unresolved-external-symbol-errors-when-using-templates
 */
-// Explicit Template Instantiation
-// Bắt buộc trình biên dịch tạo ra code cho các hàm này để Linker có thể tìm thấy.
-
+/*
+* Explicit instantiations: the templates are defined in this .cpp but used from other translation units.
+* Implicit instantiations inside a dummy function are not guaranteed to be emitted as linkable symbols
+* once the optimizer inlines them, so instantiate them explicitly.
+*/
 #define INSTANTIATE_OBJ_ARRAY_TEMPLATES(Type) \
-    template Type ObjectArray::GetByIndex<Type>(int32); \
-    template Type ObjectArray::FindObject<Type>(const std::string&, EClassCastFlags); \
-    template Type ObjectArray::FindObjectFast<Type>(const std::string&, EClassCastFlags); \
-    template Type ObjectArray::FindObjectFastInOuter<Type>(const std::string&, std::string);
+	template Type ObjectArray::GetByIndex<Type>(int32); \
+	template Type ObjectArray::FindObject<Type>(const std::string&, EClassCastFlags); \
+	template Type ObjectArray::FindObjectFast<Type>(const std::string&, EClassCastFlags); \
+	template Type ObjectArray::FindObjectFastInOuter<Type>(const std::string&, std::string);
 
 INSTANTIATE_OBJ_ARRAY_TEMPLATES(UEObject)
 INSTANTIATE_OBJ_ARRAY_TEMPLATES(UEField)
@@ -635,3 +661,44 @@ INSTANTIATE_OBJ_ARRAY_TEMPLATES(UESetProperty)
 INSTANTIATE_OBJ_ARRAY_TEMPLATES(UEEnumProperty)
 
 #undef INSTANTIATE_OBJ_ARRAY_TEMPLATES
+
+
+bool AllFieldIterator::operator!=(const AllFieldIterator& Other) const
+{
+    return CurrentObject != Other.CurrentObject || PropertyIndex != Other.PropertyIndex;
+}
+
+AllFieldIterator& AllFieldIterator::operator++()
+{
+    if (CurrenStructHasMoreMembers())
+    {
+        PropertyIndex++;
+        return *this;
+    }
+    IterateToNextStructWithMembers();
+    return *this;
+}
+
+UEProperty AllFieldIterator::operator*() const
+{
+    return Fields[PropertyIndex];
+}
+
+void AllFieldIterator::IterateToNextStruct()
+{
+    if (IsEndIterator()) return;
+    ++CurrentObject;
+    while (CurrentObject != ObjectEndIterator && !IsCurrentObjectStruct())
+        ++CurrentObject;
+}
+
+void AllFieldIterator::IterateToNextStructWithMembers()
+{
+    while (!CurrenStructHasMoreMembers())
+    {
+        IterateToNextStruct();
+        PropertyIndex = 0;
+        if (IsEndIterator()) return;
+        Fields = GetCurrentStruct().GetProperties();
+    }
+}

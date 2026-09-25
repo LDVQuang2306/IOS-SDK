@@ -2,20 +2,17 @@
 
 #include <filesystem>
 #include <fstream>
-#include <string>
-#include <vector>
 
-#include "../Managers/DependencyManager.h"
-#include "../Managers/StructManager.h"
-#include "../Managers/MemberManager.h"
-#include "../Wrappers/StructWrapper.h"
-#include "../Wrappers/MemberWrappers.h"
-#include "../Wrappers/EnumWrapper.h"
-#include "../Managers/PackageManager.h"
+#include "Managers/DependencyManager.h"
+#include "Managers/StructManager.h"
+#include "Managers/MemberManager.h"
+#include "Wrappers/StructWrapper.h"
+#include "Wrappers/MemberWrappers.h"
+#include "Wrappers/EnumWrapper.h"
+#include "Managers/PackageManager.h"
 
-#include "../HashStringTable.h"
+#include "HashStringTable.h"
 #include "Generator.h"
-#include "../../../Utils/BufferFmt.hpp" 
 
 namespace fs = std::filesystem;
 
@@ -72,91 +69,7 @@ private:
     };
 
 private:
-    // Wrapper to mimic std::ofstream but use BufferFmt for UEDumper-style saving
-    class StreamWrapper
-    {
-    private:
-        BufferFmt buffer;
-        fs::path filePath;
-        bool bIsOpen = false;
-
-    public:
-        StreamWrapper() = default;
-        
-        StreamWrapper(const fs::path& path) : filePath(path), bIsOpen(true) {}
-
-        // Move constructor
-        StreamWrapper(StreamWrapper&& other) noexcept 
-            : buffer(std::move(other.buffer)), filePath(std::move(other.filePath)), bIsOpen(other.bIsOpen) 
-        {
-            other.bIsOpen = false;
-        }
-
-        // Move assignment
-        StreamWrapper& operator=(StreamWrapper&& other) noexcept {
-            if (this != &other) {
-                buffer = std::move(other.buffer);
-                filePath = std::move(other.filePath);
-                bIsOpen = other.bIsOpen;
-                other.bIsOpen = false;
-            }
-            return *this;
-        }
-
-        bool is_open() const { return bIsOpen; }
-
-        void close() {
-            if (bIsOpen && !filePath.empty()) {
-                // Ensure directory exists before saving
-                if (filePath.has_parent_path()) {
-                    fs::create_directories(filePath.parent_path());
-                }
-                buffer.writeBufferToFile(filePath.string());
-                bIsOpen = false;
-            }
-        }
-
-        // Destructor usually shouldn't save automatically to avoid double writes, 
-        // but for safety in C++ logic we can check if it's open.
-        // However, in this logic, we call close() explicitly via WriteFileEnd or manually.
-        ~StreamWrapper() {
-            // Optional: Auto-save on destruction if not closed? 
-            // Better to be explicit in CppGenerator.cpp
-        }
-
-        // Operator overloads to support << syntax
-        StreamWrapper& operator<<(const std::string& s) {
-            buffer.append("{}", s);
-            return *this;
-        }
-
-        StreamWrapper& operator<<(const char* s) {
-            buffer.append("{}", s);
-            return *this;
-        }
-
-        StreamWrapper& operator<<(int32_t val) {
-            buffer.append("{}", val);
-            return *this;
-        }
-        
-        StreamWrapper& operator<<(uint32_t val) {
-            buffer.append("{}", val);
-            return *this;
-        }
-
-        StreamWrapper& operator<<(int64_t val) {
-            buffer.append("{}", val);
-            return *this;
-        }
-
-        StreamWrapper& operator<<(uint64_t val) {
-            buffer.append("{}", val);
-            return *this;
-        }
-    };
-
-    using StreamType = StreamWrapper;
+    using StreamType = std::ofstream;
 
 public:
     static inline PredefinedMemberLookupMapType PredefinedMembers;
@@ -181,23 +94,25 @@ private:
     static FunctionInfo GenerateFunctionInfo(const FunctionWrapper& Func);
 
     // return: In-header function declarations and inline functions
-    static std::string GenerateSingleFunction(const FunctionWrapper& Func, const std::string& StructName, StreamType& FunctionFile, StreamType& ParamFile);
-    static std::string GenerateFunctions(const StructWrapper& Struct, const MemberManager& Members, const std::string& StructName, StreamType& FunctionFile, StreamType& ParamFile);
+    static std::string GenerateSingleFunction(const FunctionWrapper& Func, const std::string& StructName, StreamType& FunctionFile, StreamType& ParamFile, StreamType& AssertionFile);
+    static std::string GenerateFunctions(const StructWrapper& Struct, const MemberManager& Members, const std::string& StructName, StreamType& FunctionFile, StreamType& ParamFile, StreamType& AssertionFile);
 
-    static void GenerateStruct(const StructWrapper& Struct, StreamType& StructFile, StreamType& FunctionFile, StreamType& ParamFile, int32 PackageIndex = -1, const std::string& StructNameOverride = std::string());
+    static void GenerateStruct(const StructWrapper& Struct, StreamType& StructFile, StreamType& FunctionFile, StreamType& ParamFile, StreamType& AssertionFile, int32 PackageIndex = -1, const std::string& StructNameOverride = std::string());
 
     static void GenerateEnum(const EnumWrapper& Enum, StreamType& StructFile);
 
 private: /* utility functions */
     static std::string GetMemberTypeString(const PropertyWrapper& MemberWrapper, int32 PackageIndex = -1, bool bAllowForConstPtrMembers = false /* const USomeClass* Member; */);
     static std::string GetMemberTypeString(UEProperty Member, int32 PackageIndex = -1, bool bAllowForConstPtrMembers = false);
-    static std::string GetMemberTypeStringWithoutConst(UEProperty Member, int32 PackageIndex = -1);
+    static std::string GetMemberTypeStringWithoutConst(UEProperty Member, int32 PackageIndex = -1, bool* bOutIsUnknownProperty = nullptr);
 
     static std::string GetFunctionSignature(UEFunction Func);
 
     static std::string GetStructPrefixedName(const StructWrapper& Struct);
     static std::string GetEnumPrefixedName(const EnumWrapper& Enum);
     static std::string GetEnumUnderlayingType(const EnumWrapper& Enm);
+
+    static std::string GetAssertionMacroString(const std::string& PrefixedStructUniqueName);
 
     static std::string GetCycleFixupType(const StructWrapper& Struct, bool bIsForInheritance);
 
@@ -211,13 +126,11 @@ private:
     static void GeneratePropertyFixupFile(StreamType& PropertyFixup);
     static void GenerateDebugAssertions(StreamType& AssertionStream);
     static void WriteFileHead(StreamType& File, PackageInfoHandle Package, EFileType Type, const std::string& CustomFileComment = "", const std::string& CustomIncludes = "");
-    
-    // Updated to save the file
     static void WriteFileEnd(StreamType& File, EFileType Type);
 
     static void GenerateSDKHeader(StreamType& SdkHpp);
 
-    static void GenerateBasicFiles(StreamType& BasicH, StreamType& BasicCpp);
+    static void GenerateBasicFiles(StreamType& BasicH, StreamType& BasicCpp, StreamType& AssertionsFile);
 
     /*
     * Creates the UnrealContainers.hpp file (without allocation code) for the SDK. 
@@ -226,13 +139,6 @@ private:
     * See https://github.com/Fischsalat/UnrealContainers/blob/master/UnrealContainers/UnrealContainersNoAlloc.h 
     */
     static void GenerateUnrealContainers(StreamType& UEContainersHeader);
-
-    /*
-    * Creates the UtfN.hpp file for the SDK.
-    *
-    * See https://github.com/Fischsalat/UTF-N
-    */
-    static void GenerateUnicodeLib(StreamType& UnicodeLib);
 
 public:
     static void Generate();
