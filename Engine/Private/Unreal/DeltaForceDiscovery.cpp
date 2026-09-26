@@ -9,8 +9,8 @@
 #include <unordered_set>
 
 #include "DeltaForceDiscovery.h"
-#include "../../../Utils/Utils.h"
-#include "../../../Menu/Logger.h"
+#include "Utils.h"
+#include "Menu/Logger.h"
 
 /*
 * Port of the discovery/validation logic of the reference DFSDKDumper (Discovery.cpp, Layout.cpp, Names.cpp, Reader.cpp).

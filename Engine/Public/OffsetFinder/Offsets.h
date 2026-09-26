@@ -1,7 +1,7 @@
 #pragma once
-#include "../Unreal/Enums.h"
-#include "../../../Settings.h"
 
+#include "Unreal/Enums.h"
+#include "Settings.h"
 
 struct FFixedUObjectArrayLayout
 {
@@ -41,8 +41,8 @@ namespace Off
 			inline int32 PEIndex;
 			inline int32 PEOffset;
 
-			void InitPE();
-			void InitPE(int32 Index, const char* const ModuleName = nullptr);
+				void InitPE();
+			void InitPE(const int32 Index, const char* const ModuleName = Settings::General::DefaultModuleName);
 		}
 
 		namespace World
@@ -64,7 +64,9 @@ namespace Off
 		{
 			/* Whether we're using FName::AppendString or, in an edge case, FName::ToString */
 			inline bool bIsUsingAppendStringOverToString = true;
+			inline bool bIsAppendStringInlinedAndUsed = false;
 			inline int32 AppendNameToString;
+			inline int32 GetNameEntryFromName;
 			inline int32 FNameSize;
 		}
 
@@ -111,6 +113,9 @@ namespace Off
 
 		inline int32 GetObjectsOffset() { return  bIsChunked ? ChunkedFixedLayout.ObjectsOffset : FixedLayout.ObjectsOffset; }
 		inline int32 GetNumElementsOffset() { return  bIsChunked ? ChunkedFixedLayout.NumElementsOffset : FixedLayout.NumObjectsOffset; }
+		inline int32 GetMaxElementsOffset() { return  bIsChunked ? ChunkedFixedLayout.MaxElementsOffset : FixedLayout.MaxObjectsOffset; }
+		inline int32 GetNumChunksOffset() { return  bIsChunked ? ChunkedFixedLayout.NumChunksOffset : 0x0; }
+		inline int32 GetMaxChunksOffset() { return  bIsChunked ? ChunkedFixedLayout.MaxChunksOffset : 0x0; }
 	}
 
 	namespace NameArray
@@ -130,6 +135,8 @@ namespace Off
 		inline int32 Next = 0x20;
 		inline int32 Name = 0x28;
 		inline int32 Flags = 0x30;
+
+		inline int32 EditorOnlyMetadata = -1; // Only present in editor builds
 	}
 
 	namespace FFieldClass
@@ -138,7 +145,7 @@ namespace Off
 		// Fixed for OutlineNumber FNames by OffsetFinder::FixFNameSize();
 		inline int32 Name = 0x00;
 		inline int32 Id = 0x08;
-		inline int32 CastFlags = 0x10;
+		inline int32 CastFlags = 0x10; // 0x18 on UE5.7
 		inline int32 ClassFlags = 0x18;
 		inline int32 SuperClass = 0x20;
 	}
@@ -188,11 +195,14 @@ namespace Off
 
 	namespace UStruct
 	{
+		/* Optional offset, if available we can generate a faster IsA implementation for the SDK. */
+		inline int32 StructBaseChain = -1;
+
 		inline int32 SuperStruct;
 		inline int32 Children;
 		inline int32 ChildProperties;
 		inline int32 Size;
-		inline int32 MinAlignemnt;
+		inline int32 MinAlignment;
 	}
 
 	namespace UFunction
@@ -307,4 +317,7 @@ namespace PropertySizes
 
 	inline int32 FieldPathProperty = 0x20;
 	void InitFFieldPathSize();
+
+	inline int32 MulticastInlineDelegateProperty = 0x10;
+	void InitTMulticastInlineDelegateSize();
 }

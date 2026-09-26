@@ -4,8 +4,9 @@
 #include <unordered_map>
 #include <unordered_set>
 
-#include "../../../Engine/Public/Unreal/UnrealObjects.h"
-#include "../HashStringTable.h"
+#include "Unreal/UnrealObjects.h"
+#include "HashStringTable.h"
+#include "Menu/Logger.h"
 
 
 /*
@@ -132,6 +133,17 @@ public:
 		if (!Struct)
 			return {};
 
+		/* Diagnostic only: identify the missing struct before .at() throws.
+		 * If you see this log, the next line is the crash — capture the index
+		 * and name so we know exactly what slipped past StructManager::Init. */
+		if (StructInfoOverrides.find(Struct.GetIndex()) == StructInfoOverrides.end())
+		{
+			LogError("StructManager::GetInfo MISS  idx=%d  name='%s'  addr=%p  (about to throw)",
+				Struct.GetIndex(),
+				Struct.GetName().c_str(),
+				Struct.GetAddress());
+		}
+
 		return StructInfoOverrides.at(Struct.GetIndex());
 	}
 
@@ -139,7 +151,7 @@ public:
 	{
 		auto It = CyclicStructsAndPackages.find(StructIndex);
 		if (It != CyclicStructsAndPackages.end())
-			return It->second.find(PackageIndex) != It->second.end();
+			return It->second.contains(PackageIndex);
 
 		return false;
 	}

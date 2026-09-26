@@ -2,9 +2,9 @@
 
 #include <memory>
 
-#include "../../../Engine/Public/Unreal/ObjectArray.h"
-#include "../Managers/CollisionManager.h"
-#include "StructWrapper.h"
+#include "Unreal/ObjectArray.h"
+#include "Managers/CollisionManager.h"
+#include "Wrappers/StructWrapper.h"
 
 class PropertyWrapper
 {

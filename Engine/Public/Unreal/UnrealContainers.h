@@ -5,7 +5,7 @@
 
 #include "Enums.h"
 //#include "Encoding/UtfN.hpp"
-#include "../../../Settings.h"
+#include "Settings.h"
 
 namespace UC
 {
@@ -177,11 +177,7 @@ namespace UC
 		template<typename SetType>
 		class SetElement
 		{
-		private:
-			template<typename SetDataType>
-			friend class TSet;
-
-		private:
+		public:
 			SetType Value;
 			int32 HashNextId;
 			int32 HashIndex;
@@ -334,13 +330,8 @@ namespace UC
 		{
 			if (*this)
 			{
-#if UEVERSION >= 421
-                std::u16string Str(Data);
+                UnrealString Str(Data);
                 return std::string(Str.begin(), Str.end());
-#else
-                std::wstring Str(Data);
-                return std::string(Str.begin(), Str.end());
-#endif
 			}
 			return "";
 		}
@@ -476,7 +467,7 @@ namespace UC
 
 	public:
 		inline       SparseArrayElementType& operator[](int32 Index)       { VerifyIndex(Index); return *reinterpret_cast<SparseArrayElementType*>(&Data.GetUnsafe(Index).ElementData); }
-		inline const SparseArrayElementType& operator[](int32 Index) const { VerifyIndex(Index); return *reinterpret_cast<SparseArrayElementType*>(&Data.GetUnsafe(Index).ElementData); }
+		inline const SparseArrayElementType& operator[](int32 Index) const { VerifyIndex(Index); return *reinterpret_cast<const SparseArrayElementType*>(&Data.GetUnsafe(Index).ElementData); }
 
 		inline bool operator==(const TSparseArray<SparseArrayElementType>& Other) const { return Data == Other.Data; }
 		inline bool operator!=(const TSparseArray<SparseArrayElementType>& Other) const { return Data != Other.Data; }
@@ -642,40 +633,6 @@ namespace UC
 				return *this;
 			}
 
-			inline FSetBitIterator& operator--()
-			{
-				// Lùi lại 1 index để bắt đầu tìm kiếm ngược
-				int32 SearchIndex = CurrentBitIndex - 1;
-
-				// Duyệt ngược về 0 để tìm bit được set (bật) gần nhất
-				while (SearchIndex >= 0)
-				{
-					// Kiểm tra xem bit tại vị trí này có được bật không
-					// Lưu ý: Array phải có operator[] hợp lệ
-					if (Array.IsValidIndex(SearchIndex) && Array[SearchIndex])
-					{
-						CurrentBitIndex = SearchIndex;
-
-						// Cập nhật lại trạng thái nội bộ (Mask, WordIndex) để đồng bộ
-						// Điều này cần thiết nếu sau này bạn lại gọi ++
-						this->WordIndex = CurrentBitIndex >> NumBitsPerDWORDLogTwo;
-						this->BaseBitIndex = CurrentBitIndex & ~(NumBitsPerDWORD - 1);
-						this->Mask = 1 << (CurrentBitIndex & (NumBitsPerDWORD - 1));
-						
-						// Reset UnvisitedBitMask để hỗ trợ việc duyệt xuôi (++) tiếp theo nếu cần
-						this->UnvisitedBitMask = (~0U) << (CurrentBitIndex & (NumBitsPerDWORD - 1));
-						this->UnvisitedBitMask &= ~this->Mask;
-
-						return *this;
-					}
-					SearchIndex--;
-				}
-
-				// Nếu không tìm thấy, đặt về trạng thái không hợp lệ (đầu danh sách)
-				CurrentBitIndex = -1;
-				return *this;
-			}
-
 			inline explicit operator bool() const { return CurrentBitIndex < Array.Num(); }
 
 			inline bool operator==(const FSetBitIterator& Rhs) const { return CurrentBitIndex == Rhs.CurrentBitIndex && &Array == &Rhs.Array; }
@@ -768,7 +725,6 @@ namespace UC
 
 		public:
 			inline TContainerIterator& operator++() { ++BitIterator; return *this; }
-			inline TContainerIterator& operator--() { --BitIterator; return *this; }
 
 			inline       auto& operator*()       { return IteratedContainer[GetIndex()]; }
 			inline const auto& operator*() const { return IteratedContainer[GetIndex()]; }

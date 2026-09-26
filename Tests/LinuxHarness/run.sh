@@ -15,8 +15,9 @@ CC=${CC:-gcc}
 SAN=""
 if echo 'int main(){}' | $CXX -x c++ -fsanitize=address -o "$BUILD/asan_probe" - 2>/dev/null; then SAN="-fsanitize=address -fno-omit-frame-pointer"; fi
 
-FLAGS="-g -O1 -std=gnu++20 -w $SAN -I$HERE/shim -I$ROOT -I$ROOT/fmt"
-SOURCES="$(cd "$ROOT" && ls Utils/Dumpspace/*.cpp Utils/*.cpp Generator/Private/*.cpp Generator/Private/Generators/*.cpp Generator/Private/Managers/*.cpp Generator/Private/Wrappers/*.cpp Engine/Private/OffsetFinder/*.cpp Engine/Private/Unreal/*.cpp) fmt/format.cc"
+INC="-I$ROOT -I$ROOT/Engine/Public -I$ROOT/Engine/Public/Unreal -I$ROOT/Engine/Public/OffsetFinder -I$ROOT/Generator/Public -I$ROOT/Generator/Public/Generators -I$ROOT/Generator/Public/Managers -I$ROOT/Generator/Public/Wrappers -I$ROOT/Platform/Public -I$ROOT/Platform/Private -I$ROOT/Utils -I$ROOT/fmt"
+FLAGS="-g -O1 -std=gnu++20 -w $SAN -I$HERE/shim $INC"
+SOURCES="$(cd "$ROOT" && ls Utils/Dumpspace/*.cpp Generator/Private/*.cpp Generator/Private/Generators/*.cpp Generator/Private/Managers/*.cpp Generator/Private/Wrappers/*.cpp Engine/Private/OffsetFinder/*.cpp Engine/Private/Unreal/*.cpp Platform/Private/*.cpp) Settings.cpp fmt/format.cc"
 
 echo "[run.sh] building dumper ($CXX $SAN)"
 cd "$ROOT"
@@ -40,7 +41,7 @@ grep -q "Reflection layout check failed" "$BUILD/harness_changed.log" && grep "R
 SDKDIR="$BUILD/home/Documents/1.0.0_Test-DeltaForce/CppSDK"
 echo "[run.sh] compiling the generated SDK and reading the image back with it"
 $CXX -std=c++20 -w -I"$SDKDIR" -I"$SDKDIR/SDK" -I"$HERE/shim" -I"$ROOT" -o "$BUILD/sdk_runtime_test" "$HERE/sdk_runtime_test.cpp" "$SDKDIR"/SDK/*.cpp \
-    "$HERE/fake_world.cpp" "$HERE/shim.cpp" "$ROOT/Engine/Private/Unreal/DeltaForceDiscovery.cpp" "$HERE/logger.cpp"
+    "$HERE/fake_world.cpp" "$HERE/shim.cpp" "$ROOT/Engine/Private/Unreal/DeltaForceDiscovery.cpp" "$HERE/logger.cpp" $INC
 "$BUILD/sdk_runtime_test"
 
 if [ -n "$IOS_SDK" ]; then

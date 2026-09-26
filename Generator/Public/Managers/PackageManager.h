@@ -1,10 +1,10 @@
 #pragma once
 
-#include "../../../Engine/Public/Unreal/Enums.h"
-#include "../../../Engine/Public/Unreal/UnrealObjects.h"
+#include "Unreal/Enums.h"
+#include "Unreal/UnrealObjects.h"
 
-#include "DependencyManager.h"
-#include "../HashStringTable.h"
+#include "Managers/DependencyManager.h"
+#include "HashStringTable.h"
 
 
 namespace PackageManagerUtils

@@ -3,10 +3,10 @@
 #include <unordered_set>
 #include <unordered_map>
 #include <iostream>
-#include <format>
+#include <format.h> // fmt: std::format is unavailable for the iOS 14 deployment target
 #include <functional>
 
-#include "../../../Engine/Public/Unreal/Enums.h"
+#include "Unreal/Enums.h"
 
 
 class DependencyManager

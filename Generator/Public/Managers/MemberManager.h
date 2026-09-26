@@ -3,10 +3,10 @@
 #include <unordered_map>
 #include <memory>
 
-#include "../../../Engine/Public/Unreal/ObjectArray.h"
-#include "../HashStringTable.h"
+#include "ObjectArray.h"
+#include "HashStringTable.h"
 #include "CollisionManager.h"
-#include "../PredefinedMembers.h"
+#include "PredefinedMembers.h"
 
 
 template<bool bIsDeferredTemplateCreation = true>
@@ -219,70 +219,10 @@ public:
 	}
 
 	/* Add special names like "Class", "Flags, "Parms", etc. to avoid collisions on them */
-	static inline void InitReservedNames()
-	{
-		/* UObject reserved names */
-		MemberNames.AddReservedClassName("Flags", false);
-		MemberNames.AddReservedClassName("Index", false);
-		MemberNames.AddReservedClassName("Class", false);
-		MemberNames.AddReservedClassName("Name", false);
-		MemberNames.AddReservedClassName("Outer", false);
+	static void InitReservedNames();
 
-		/* UFunction reserved names */
-		MemberNames.AddReservedClassName("FunctionFlags", false);
-
-		/* Function-body reserved names */
-		MemberNames.AddReservedClassName("Func", true);
-		MemberNames.AddReservedClassName("Parms", true);
-		MemberNames.AddReservedClassName("Params", true);
-		MemberNames.AddReservedClassName("Flgs", true);
-
-
-		/* Reserved C++ keywords, typedefs and macros */
-		MemberNames.AddReservedName("byte");
-		MemberNames.AddReservedName("short");
-		MemberNames.AddReservedName("int");
-		MemberNames.AddReservedName("float");
-		MemberNames.AddReservedName("double");
-		MemberNames.AddReservedName("long");
-		MemberNames.AddReservedName("signed");
-		MemberNames.AddReservedName("unsigned");
-		MemberNames.AddReservedName("operator");
-		MemberNames.AddReservedName("return");
-
-		MemberNames.AddReservedName("or");
-		MemberNames.AddReservedName("and");
-		MemberNames.AddReservedName("xor");
-
-		MemberNames.AddReservedName("struct");
-		MemberNames.AddReservedName("class");
-		MemberNames.AddReservedName("for");
-		MemberNames.AddReservedName("while");
-		MemberNames.AddReservedName("this");
-		MemberNames.AddReservedName("private");
-		MemberNames.AddReservedName("public");
-		MemberNames.AddReservedName("const");
-
-		MemberNames.AddReservedName("int8");
-		MemberNames.AddReservedName("int16");
-		MemberNames.AddReservedName("int32");
-		MemberNames.AddReservedName("int64");
-		MemberNames.AddReservedName("uint8");
-		MemberNames.AddReservedName("uint16");
-		MemberNames.AddReservedName("uint32");
-		MemberNames.AddReservedName("uint64");
-
-		MemberNames.AddReservedName("TRUE");
-		MemberNames.AddReservedName("FALSE");
-		MemberNames.AddReservedName("true");
-		MemberNames.AddReservedName("false");
-
-		MemberNames.AddReservedName("IN");
-		MemberNames.AddReservedName("OUT");
-
-		MemberNames.AddReservedName("min");
-		MemberNames.AddReservedName("max");
-	}
+	/* Fixes the casing of FRotator members. pitch -> Pitch, yaw -> Yaw, roll -> Roll */
+	static void FixIncorrectNames();
 
 	static inline void Init()
 	{
@@ -304,6 +244,8 @@ public:
 
 			AddStructToNameContainer(Obj.Cast<UEStruct>());
 		}
+
+		FixIncorrectNames();
 	}
 
 	static inline void AddStructToNameContainer(UEStruct Struct)

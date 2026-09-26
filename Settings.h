@@ -3,17 +3,21 @@
 #include <string>
 #include <cstdint>
 
-#include "Engine/Public/Unreal/Enums.h"
+#include "Unreal/Enums.h"
 
 /*
-* Engine version of the target game.
-*  - >= 421: TCHAR is char16_t (UTF-16). Required for every FNamePool/FProperty game, including Delta Force (UE4.26+).
-*  -  < 421: TCHAR is wchar_t (legacy UE4.17-4.20 iOS builds).
-*/
-#ifndef UEVERSION
+ * Selects the dumper's TCHAR width based on the target UE version.
+ *
+ * Verified against working ARK 2.0 (4.17) and ARK Revamp (4.26) iOS tweak references:
+ *   - UE  <  4.21 : FString uses 32-bit chars on iOS → TCHAR = wchar_t,  TEXT(x) = L##x
+ *   - UE >=  4.21 : FString uses 16-bit chars       → TCHAR = char16_t, TEXT(x) = u##x
+ *
+ * Set this to match the *target game's* UE version. This drives:
+ *   - the dumper's internal string reads,
+ *   - the emitted SDK's `using TCHAR = ...;` alias,
+ *   - the emitted STATIC_NAME_IMPL literal prefix (L"..." vs u"...").
+ */
 #define UEVERSION 426
-#endif
-
 
 #if UEVERSION >= 421
 
@@ -30,8 +34,8 @@
     }
 
 #else
-    #define TEXT(x) L##x
 
+    #define TEXT(x) L##x
     typedef wchar_t TCHAR;
 
     using UnrealString = std::wstring;
@@ -46,20 +50,43 @@
 
 namespace Settings
 {
+	namespace General
+	{
+		/* This option determines whether calls to FindByStringInAllSections should only search executable sections, or all sections. */
+		constexpr bool bSearchOnlyExecutableSectionsForStrings = true;
+
+		/* If the target module is not the main executable, specify it here (iOS: the Mach-O image name, e.g. "DeltaForceClient") */
+		constexpr const char* DefaultModuleName = nullptr;
+	}
+
+	inline constexpr const char* GlobalConfigPath = "";
+
+	namespace Config
+	{
+		inline int SleepTimeout = 0;
+		inline int DumpKey = 0;
+		inline std::string SDKNamespaceName = "SDK";
+
+		void Load();
+		void DelayDumperStart();
+	};
+
 	namespace EngineCore
 	{
 		/* A special setting to fix UEnum::Names where the type is sometimes TArray<FName> and sometimes TArray<TPair<FName, Some8ByteData>> */
 		constexpr bool bCheckEnumNamesInUEnum = false;
+
+		/* Enables support for TEncryptedObjectProperty */
+		constexpr bool bEnableEncryptedObjectPropertySupport = false;
 	}
 
 	namespace Generator
 	{
-		//Auto generated if no override is provided
+		/* Auto generated if no override is provided */
 		inline std::string GameName = "";
 		inline std::string GameVersion = "";
 
-		/* The SDK is written to <SDKGenerationPath>/Documents/<GameVersion>-<GameName>/ */
-		inline const char* SDKGenerationPath = getenv("HOME");
+		inline std::string SDKGenerationPath = getenv("HOME") ? getenv("HOME") : "";
 	}
 
 	namespace DeltaForce
@@ -83,17 +110,16 @@ namespace Settings
 		/* No prefix for files->FilePrefix = "" */
 		constexpr const char* FilePrefix = "";
 
-		/* No seperate namespace for SDK -> SDKNamespaceName = nullptr */
-		constexpr const char* SDKNamespaceName = "SDK";
-
 		/* No seperate namespace for Params -> ParamNamespaceName = nullptr */
 		constexpr const char* ParamNamespaceName = "Params";
 
-		
+		/* XOR function name, that will be wrapped around any generated string. e.g. "xorstr_" -> xorstr_("Pawn") etc. */
 		constexpr const char* XORString = nullptr;
+		/* XOR header file name. e.g. "xorstr.hpp" */
+		constexpr const char* XORStringInclude = nullptr;
 
 		/* Customizable part of Cpp code to allow for a custom 'uintptr_t InSDKUtils::GetImageBase()' function */
-		constexpr const char* GetImageBaseFuncBody = 
+		constexpr const char* GetImageBaseFuncBody =
 R"({
 	/* Offsets in this SDK are relative to the mach header of the main executable (NOT the ASLR slide). */
 	static uintptr_t ImageBase = 0x0;
@@ -130,6 +156,9 @@ R"(
 
 		/* This will allow the user to manually initialize global variable addresses in the SDK (eg. GObjects, GNames, AppendString). */
 		constexpr bool bAddManualOverrideOptions = true;
+
+		/* Adds the 'final' specifier to classes with no loaded child class at SDK-generation time. */
+		constexpr bool bAddFinalSpecifier = true;
 	}
 
 	namespace MappingGenerator
@@ -147,13 +176,26 @@ R"(
 	/* Partially implemented  */
 	namespace Debug
 	{
+		/* Generates a dedicated file defining macros for static asserts (Make sure InlineAssertions are off) */
 		inline constexpr bool bGenerateAssertionFile = false;
 
-		/* Adds static_assert for struct-size, as well as struct-alignment */
-		inline constexpr bool bGenerateInlineAssertionsForStructSize = true;
+		/* Prefix for assertion macros in assertion file. Example for "MyPackage_params.hpp": #define DUMPER7_ASSERTS_PARAMS_MyPackage */
+		inline constexpr const char* AssertionMacroPrefix = "DUMPER7_ASSERTS_";
 
-		/* Adds static_assert for member-offsets */
-		inline constexpr bool bGenerateInlineAssertionsForStructMembers = true;
+
+		/* Adds static_assert for struct-size, as well as struct-alignment.
+		 * NOTE (iOS): leave OFF — a handful of UE delegate-binding/template parent
+		 * structs (e.g. FBlueprintInputDelegateBinding, FMovieSceneEvalTemplateBase)
+		 * use the `bHasReusedTrailingPadding` trick. On clang `alignas` overrides
+		 * `#pragma pack(1)` so the layout the dumper observed (parent ends at byte 1)
+		 * can't be reproduced, and the static_asserts fail. The runtime layout in
+		 * the live process is still correct — only standalone use of those ~6
+		 * obscure parents would be wrong, and tweaks don't typically touch them.
+		 */
+		inline constexpr bool bGenerateInlineAssertionsForStructSize = false;
+
+		/* Adds static_assert for member-offsets. See note above. */
+		inline constexpr bool bGenerateInlineAssertionsForStructMembers = false;
 
 
 		/* Prints debug information during Mapping-Generation */
@@ -170,6 +212,9 @@ R"(
 
 		/* Whether the 'Value' component in the Pair<Name, Value> UEnum::Names is a uint8 value, rather than the default int64 */
 		inline bool bIsSmallEnumValue = false;
+
+		/* Whether UEnum::Names is of the new 'FNameData' type, rather than TArray<...> */
+		inline bool bIsNewUE5EnumNamesContainer = false;
 
 		/* Whether TWeakObjectPtr contains 'TagAtLastTest' */
 		inline bool bIsWeakObjectPtrWithoutTag = false;
@@ -189,6 +234,8 @@ R"(
 		/* Whether this games uses FNameOutlineNumber, moving the 'Number' component from FName into FNameEntry inside of FNamePool */
 		inline bool bUseOutlineNumberName = false;
 
+		/* Whether this game uses the 'FFieldPathProperty' cast flags for a custom property 'FObjectPtrProperty' */
+		inline bool bIsObjPtrInsteadOfFieldPathProperty = false;
 
 		/* Whether this games' engine version uses a contexpr flag to determine whether a FFieldVariant holds a UObject* or FField* */
 		inline bool bUseMaskForFieldOwner = false;
@@ -196,10 +243,19 @@ R"(
 		/* Whether this games' engine version uses double for FVector, instead of float. Aka, whether the engine version is UE5.0 or higher. */
 		inline bool bUseLargeWorldCoordinates = false;
 
+		/* Whether this game uses uint8 for UEProperty::ArrayDim, instead of int32 */
+		inline bool bUseUint8ArrayDim = false;
+
 		/* Resolve EClassCastFlags from the class/field-class names instead of reading UClass::CastFlags/FFieldClass::CastFlags (Delta Force). */
 		inline bool bUseNameBasedCastFlags = false;
 
 		/* Set when the game-specific (Delta Force) engine profile initialized the engine core. */
 		inline bool bIsDeltaForce = false;
 	}
+
+	extern void InitWeakObjectPtrSettings();
+	extern void InitLargeWorldCoordinateSettings();
+
+	extern void InitObjectPtrPropertySettings();
+	extern void InitArrayDimSizeSettings();
 }

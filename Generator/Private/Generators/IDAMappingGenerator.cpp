@@ -1,9 +1,12 @@
 
+#include <format.h> // fmt: std::format is unavailable for the iOS 14 deployment target
 #include <fstream>
 
-#include "../../Public/Generators/IDAMappingGenerator.h"
+#include "Generators/IDAMappingGenerator.h"
+#include "Platform.h"
 
 
+#include "Menu/Logger.h"
 std::string IDAMappingGenerator::MangleFunctionName(const std::string& ClassName, const std::string& FunctionName)
 {
 	return "_ZN" + std::to_string(ClassName.length()) + ClassName + std::to_string(FunctionName.length() + 4) + "exec" + FunctionName + "Ev";
@@ -40,16 +43,16 @@ struct Identifier
 
 void IDAMappingGenerator::GenerateVTableName(StreamType& IdmapFile, UEObject DefaultObject)
 {
-	UEClass Class = DefaultObject.GetClass();
-	UEClass Super = Class.GetSuper().Cast<UEClass>();
+	const UEClass Class = DefaultObject.GetClass();
+	const UEClass Super = Class.GetSuper().Cast<UEClass>();
 
 	if (Super && DefaultObject.GetVft() == Super.GetDefaultObject().GetVft())
 		return;
 
-	std::string Name = Class.GetCppName() + "_VFT";
+	const std::string Name = Class.GetCppName() + "_VFT";
 
-	uint32 Offset = static_cast<uint32>(GetOffset(DefaultObject.GetVft()));
-	uint16 NameLen = static_cast<uint16>(Name.length());
+	const uint32 Offset = static_cast<uint32>(Platform::GetOffset(DefaultObject.GetVft()));
+	const uint16 NameLen = static_cast<uint16>(Name.length());
 
 	WriteToStream(IdmapFile, Offset);
 	WriteToStream(IdmapFile, NameLen);
@@ -60,21 +63,21 @@ void IDAMappingGenerator::GenerateClassFunctions(StreamType& IdmapFile, UEClass 
 {
 	static std::unordered_map<uint32, std::string> Funcs;
 
-	for (UEFunction Func : Class.GetFunctions())
+	for (const UEFunction Func : Class.GetFunctions())
 	{
 		if (!Func.HasFlags(EFunctionFlags::Native))
 			continue;
 
-		std::string MangledName = MangleFunctionName(Class.GetCppName(), Func.GetValidName());
+		const std::string MangledName = MangleFunctionName(Class.GetCppName(), Func.GetValidName());
 
-		uint32 Offset = static_cast<uint32>(GetOffset(Func.GetExecFunction()));
-		uint16 NameLen = static_cast<uint16>(MangledName.length());
+		const uint32 Offset = static_cast<uint32>(Platform::GetOffset(Func.GetExecFunction()));
+		const uint16 NameLen = static_cast<uint16>(MangledName.length());
 
 		auto [It, bInseted] = Funcs.emplace(Offset, Func.GetFullName());
 
 		if (!bInseted)
 		{
-			//std::cout << "Collision: \nOld: " << It->second << "\nNew: " << Func.GetFullName() << "\n" << std::endl;
+			//LogError("%s", fmt::format("Collision: \nOld: {}\nNew: {}\n", It->second, Func.GetFullName()).c_str());
 			continue;
 		}
 
