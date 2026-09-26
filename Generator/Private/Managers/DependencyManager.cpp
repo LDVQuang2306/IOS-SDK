@@ -28,7 +28,12 @@ size_t DependencyManager::GetNumEntries() const
 
 void DependencyManager::VisitIndexAndDependencies(int32 Index, OnVisitCallbackType Callback) const
 {
-	auto& [IterationHitCounter, Dependencies] = AllDependencies.at(Index);
+	/* A dependency that isn't a node itself (not part of this package's list) is skipped, this was AllDependencies.at() and threw */
+	auto It = AllDependencies.find(Index);
+	if (It == AllDependencies.end())
+		return;
+
+	auto& [IterationHitCounter, Dependencies] = It->second;
 
 	if (IterationHitCounter >= CurrentIterationHitCount)
 		return;

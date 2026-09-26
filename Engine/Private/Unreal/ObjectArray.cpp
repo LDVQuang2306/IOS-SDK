@@ -511,6 +511,9 @@ void ObjectArray::DumpObjectsWithProperties(const fs::path& Path, bool bWithPath
 
 int32 ObjectArray::Num()
 {
+	if (bUseSnapshot)
+		return static_cast<int32>(Snapshot.size());
+
 	if (!GObjects)
 		return 0;
 
@@ -520,10 +523,40 @@ int32 ObjectArray::Num()
 template<typename UEType>
 UEType ObjectArray::GetByIndex(int32 Index)
 {
+	if (bUseSnapshot)
+		return Index >= 0 && Index < static_cast<int32>(Snapshot.size()) ? UEType(Snapshot[Index]) : UEType();
+
 	if (!GObjects || !ByIndex)
 		return UEType();
 
 	return UEType(ByIndex(GObjects + Off::FUObjectArray::GetObjectsOffset(), Index, SizeOfFUObjectItem, FUObjectItemInitialOffset, NumElementsPerChunk));
+}
+
+void ObjectArray::CreateSnapshot()
+{
+	bUseSnapshot = false;
+	Snapshot.clear();
+
+	const int32 NumObjects = Num();
+	Snapshot.reserve(NumObjects);
+
+	for (int32 i = 0; i < NumObjects; i++)
+		Snapshot.push_back(GetByIndex(i).GetAddress());
+
+	bUseSnapshot = true;
+
+	LogInfo("ObjectArray: snapshot of %d objects, objects loaded after this point are not part of the SDK", NumObjects);
+}
+
+bool ObjectArray::IsStillAlive(int32 Index)
+{
+	if (!bUseSnapshot)
+		return true;
+
+	if (Index < 0 || Index >= static_cast<int32>(Snapshot.size()) || !GObjects || !ByIndex)
+		return false;
+
+	return ByIndex(GObjects + Off::FUObjectArray::GetObjectsOffset(), Index, SizeOfFUObjectItem, FUObjectItemInitialOffset, NumElementsPerChunk) == Snapshot[Index];
 }
 
 template<typename UEType>
@@ -614,11 +647,14 @@ UEObject ObjectArray::ObjectsIterator::operator*()
 
 ObjectArray::ObjectsIterator& ObjectArray::ObjectsIterator::operator++()
 {
-	CurrentObject = ObjectArray::GetByIndex(++CurrentIndex);
+	/* Objects garbage collected since the snapshot are skipped */
+	auto GetIfAlive = [](int32 Index) -> UEObject { return ObjectArray::IsStillAlive(Index) ? ObjectArray::GetByIndex(Index) : UEObject(); };
+
+	CurrentObject = GetIfAlive(++CurrentIndex);
 
 	while (!CurrentObject && CurrentIndex < (ObjectArray::Num() - 1))
 	{
-		CurrentObject = ObjectArray::GetByIndex(++CurrentIndex);
+		CurrentObject = GetIfAlive(++CurrentIndex);
 	}
 
 	if (!CurrentObject && CurrentIndex == (ObjectArray::Num() - 1)) [[unlikely]]

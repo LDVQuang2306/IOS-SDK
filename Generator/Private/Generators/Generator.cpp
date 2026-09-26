@@ -136,20 +136,28 @@ bool Generator::InitEngineCore()
 void Generator::InitInternal()
 {
 	LogInfo("Initializing Internal Generator...");
+
+	// All managers have to see the same objects, the game keeps loading and garbage collecting objects while the SDK is generated
+	ObjectArray::CreateSnapshot();
 	
 	// Initialize PackageManager with all packages, their names, structs, classes enums, functions and dependencies
+	LogInfo("Generator: collecting packages and their dependencies...");
 	PackageManager::Init();
 
 	// Initialize StructManager with all structs and their names
+	LogInfo("Generator: %d packages, initializing structs...", static_cast<int32>(PackageManager::GetPackageInfos().size()));
 	StructManager::Init();
 	
 	// Initialize EnumManager with all enums and their names
+	LogInfo("Generator: %d structs/classes, initializing enums...", static_cast<int32>(StructManager::GetStructInfos().size()));
 	EnumManager::Init();
 	
 	// Initialized all Member-Name collisions
+	LogInfo("Generator: %d enums, initializing member names...", static_cast<int32>(EnumManager::GetEnumInfos().size()));
 	MemberManager::Init();
 
 	// Post-Initialize PackageManager after StructManager has been initialized. 'PostInit()' handles Cyclic-Dependencies detection
+	LogInfo("Generator: resolving cyclic package dependencies...");
 	PackageManager::PostInit();
 	
 	LogSuccess("Internal Generator initialized successfully");

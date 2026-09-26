@@ -141,10 +141,23 @@ public:
 	template<typename UEType>
 	inline NameInfo GetNameCollisionInfoUnchecked(UEStruct Struct, UEType Member)
 	{
-		CollisionManager::NameContainer& InfosForStruct = NameInfos.at(Struct.GetIndex());
-		uint64 NameInfoIndex = TranslationMap[KeyFunctions::GetKeyForCollisionInfo(Struct, Member)];
+		/* Used to be NameInfos.at(), a struct that wasn't in the object list when the names were collected aborted the whole dump */
+		auto It = NameInfos.find(Struct.GetIndex());
+		if (It == NameInfos.end()) [[unlikely]]
+		{
+			AddStructToNameContainer(Struct, !Struct.IsA(EClassCastFlags::Class) && !Struct.IsA(EClassCastFlags::Function));
+			It = NameInfos.find(Struct.GetIndex());
+		}
 
-		return InfosForStruct.at(NameInfoIndex);
+		auto IndexIt = TranslationMap.find(KeyFunctions::GetKeyForCollisionInfo(Struct, Member));
+		if (It == NameInfos.end() || IndexIt == TranslationMap.end() || IndexIt->second >= It->second.size()) [[unlikely]]
+		{
+			/* Member unknown to the collision data (added to the struct while dumping): use its name without collision handling */
+			constexpr ECollisionType Type = std::is_same_v<UEType, UEFunction> ? ECollisionType::FunctionName : ECollisionType::MemberName;
+			return NameInfo(MemberNames.FindOrAdd(Member.GetValidName(), false).first, Type);
+		}
+
+		return It->second[IndexIt->second];
 	}
 };
 

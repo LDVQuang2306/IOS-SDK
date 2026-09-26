@@ -2,6 +2,7 @@
 #include "../../../Engine/Public/Unreal/ObjectArray.h"
 
 #include "../../Public/Managers/PackageManager.h"
+#include "../../../Menu/Logger.h"
 
 /* Required for marking cyclic-headers in the StructManager */
 #include "../../Public/Managers/StructManager.h"
@@ -458,7 +459,11 @@ void PackageManager::HelperAddEnumsFromPacakageToFwdDeclarations(UEStruct Struct
 
 void PackageManager::HelperInitEnumFwdDeclarationsForPackage(int32 PackageForFwdDeclarations, int32 RequiredPackage, bool bIsClass)
 {
-	PackageInfo& Info = PackageInfos.at(PackageForFwdDeclarations);
+	auto InfoIt = PackageInfos.find(PackageForFwdDeclarations);
+	if (InfoIt == PackageInfos.end())
+		return;
+
+	PackageInfo& Info = InfoIt->second;
 
 	std::vector<std::pair<int32, bool>>& EnumsToForwardDeclare = Info.EnumForwardDeclarations;
 
@@ -493,6 +498,7 @@ void PackageManager::HandleCycles()
 	};
 
 	std::vector<CycleInfo> HandledPackages;
+	int32 NumClassCycles = 0;
 
 
 	FindCycleCallbackType CleanedUpOnCycleFoundCallback = [&HandledPackages](const PackageManagerIterationParams& OldParams, const PackageManagerIterationParams& NewParams, bool bIsStruct) -> void
@@ -610,18 +616,38 @@ void PackageManager::HandleCycles()
 			continue;
 		}
 
-		const RequirementInfo& CurrentRequirements = CurrentPackageInfo.GetPackageDependencies().ClassesDependencies.at(Cycle.CurrentPackage);
-
-		/* Mark classes as 'do not include' when this package is cyclic but can still require _structs.hpp */
-		if (CurrentRequirements.bShouldIncludeStructs)
-		{
-			const_cast<RequirementInfo&>(CurrentRequirements).bShouldIncludeClasses = false;
-		}
-		else
-		{
-			CurrentPackageInfo.ErasePackageDependencyFromClasses(Cycle.PreviousPacakge);
-		}
+		/*
+		* A _classes.hpp only includes another _classes.hpp for the super class of one of its classes, a base class can't be forward
+		* declared, so the include is kept. (This was ClassesDependencies.at(Cycle.CurrentPackage), which only changed the entry of the
+		* package's own _structs.hpp and threw "unordered_map::at: key not found" when a package didn't use its own structs.)
+		*/
+		NumClassCycles++;
 	}
+
+	LogInfo("PackageManager: %d cyclic dependencies between _structs.hpp files and %d between _classes.hpp files handled",
+		static_cast<int32>(HandledPackages.size()) - NumClassCycles, NumClassCycles);
+}
+
+const PackageInfo& PackageManager::GetMissingPackageInfo(int32 PackageIndex)
+{
+	static std::unordered_map<int32, PackageInfo> MissingPackageInfos;
+
+	auto [It, bInserted] = MissingPackageInfos.try_emplace(PackageIndex);
+
+	if (bInserted)
+	{
+		const UEObject Package = ObjectArray::GetByIndex(PackageIndex);
+		const std::string Name = Package ? Package.GetValidName() : ("MissingPackage_" + std::to_string(PackageIndex));
+
+		LogError("PackageManager: package '%s' (index %d) has no entry, it was loaded/unloaded while dumping", Name.c_str(), PackageIndex);
+
+		PackageInfo& Info = It->second;
+		Info.PackageIndex = PackageIndex;
+		Info.bHasParams = false;
+		Info.Name = UniquePackageNameTable.FindOrAdd(Name).first;
+	}
+
+	return It->second;
 }
 
 void PackageManager::Init()
@@ -701,7 +727,11 @@ void PackageManager::IterateDependenciesImplementation(const PackageManagerItera
 		.VisitedNodes = Params.VisitedNodes,
 	};
 
-	DependencyInfo& Dependencies = PackageInfos.at(Params.RequiredPackage).PackageDependencies;
+	auto InfoIt = PackageInfos.find(Params.RequiredPackage);
+	if (InfoIt == PackageInfos.end())
+		return;
+
+	DependencyInfo& Dependencies = InfoIt->second.PackageDependencies;
 
 	SingleDependencyIterationParamsInternal StructsParams{
 		.CallbackForEachPackage = CallbackForEachPackage,

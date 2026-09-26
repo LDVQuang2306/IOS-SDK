@@ -81,7 +81,13 @@ make SDK_DIR=/path/to/1.203.37117_65-DeltaForce/CppSDK            # Basic.cpp + 
 make SDK_DIR=/path/to/1.203.37117_65-DeltaForce/CppSDK SDK_ALL=1  # every <Package>_functions.cpp
 ```
 
-`Tests/LinuxHarness/run.sh` dumps a synthetic Delta Force process that contains all of the layouts above and compiles the generated SDK (set `IOS_SDK=/path/to/iPhoneOS.sdk` to also compile it for `arm64-apple-ios`).
+`Tests/LinuxHarness/run.sh` dumps a synthetic Delta Force process that contains all of the layouts above and compiles the generated SDK (set `IOS_SDK=/path/to/iPhoneOS.sdk` to also compile it for `arm64-apple-ios`). `Tests/LinuxHarness/make_world.py` turns a real dump (`GObjects-Dump-WithProperties.txt` + `CppSDK/`) into an object graph the harness can replay, so the generator can be run against the ~105k objects of the real game on Linux.
+
+### Dumping while the game runs
+
+The game keeps loading and garbage collecting objects while the SDK is generated. The generator takes a snapshot of the object list first and every manager works on that snapshot. A struct/enum/package that is still missing is added on the fly instead of aborting the dump (this was `Dump failed with an exception: unordered_map::at: key not found`), objects the game unloaded in the meantime are skipped and logged. `UObject::Flags` is only used when `RF_ClassDefaultObject` is set on every `Default__` object and on no other object, otherwise CDOs are detected by name.
+
+The log window keeps the newest line in view (auto-scroll pauses while you drag the log up and resumes at the end), every line of a multi-line message is its own log entry.
 
 Usage: open the game, **wait until the lobby is fully loaded**, then press *Start Dump*. If it reports that GNames/GObjects were not found, wait a bit longer and press it again (nothing is written before the engine core validated).
 

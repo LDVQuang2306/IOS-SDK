@@ -321,6 +321,10 @@ std::stringstream MappingGenerator::GenerateFileData()
 
         for (int32 EnumIdx : Package.GetEnums())
         {
+            /* Objects the game garbage collected since the generator's snapshot are skipped */
+            if (!ObjectArray::IsStillAlive(EnumIdx))
+                continue;
+
             GenerateEnum(ObjectArray::GetByIndex<UEEnum>(EnumIdx), EnumData, NameData);
             NumEnums++;
         }
@@ -338,6 +342,9 @@ std::stringstream MappingGenerator::GenerateFileData()
 
         DependencyManager::OnVisitCallbackType GenerateStructCallback = [&](int32 Index) -> void
         {
+            if (!ObjectArray::IsStillAlive(Index))
+                return;
+
             GenerateStruct(ObjectArray::GetByIndex<UEStruct>(Index), StructData, NameData);
             NumStructsAndClasse++;
         };
