@@ -23,6 +23,10 @@ public:
     bool autoScroll = true;
     bool visible = true;
 
+    /* Number of lines ever added (outputArr stops growing at MaxLines), used to scroll to the newest line */
+    size_t totalLines = 0;
+    size_t renderedLines = 0;
+
     void log(const std::string& text);
     void logError(const std::string& text);
     void logInfo(const std::string& text); // Using for Success/Highlight

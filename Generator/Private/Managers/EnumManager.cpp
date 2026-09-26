@@ -1,4 +1,5 @@
 #include "../../Public/Managers/EnumManager.h"
+#include "../../../Menu/Logger.h"
 
 namespace EnumInitHelper
 {
@@ -117,10 +118,14 @@ void EnumManager::InitInternal()
 				Info.bWasInstanceFound = true;
 				Info.UnderlyingTypeSize = 0x1;
 
-				/* Check if the size of this enums underlaying type is greater than the default size (0x1) */
+				/* Check if the size of this enums underlaying type is greater than the default size (0x1). Other sizes than 1/2/4/8 are bad reads. */
 				if (Enum)
 				{
-					Info.UnderlyingTypeSize = Property.GetSize();
+					const int32 Size = Property.GetSize();
+
+					if (Size == 0x1 || Size == 0x2 || Size == 0x4 || Size == 0x8)
+						Info.UnderlyingTypeSize = static_cast<uint8>(Size);
+
 					continue;
 				}
 
@@ -133,71 +138,86 @@ void EnumManager::InitInternal()
 		}
 		else if (Obj.IsA(EClassCastFlags::Enum))
 		{
-			UEEnum ObjAsEnum = Obj.Cast<UEEnum>();
-
-			/* Add name to override info */
-			EnumInfo& NewOrExistingInfo = EnumInfoOverrides[Obj.GetIndex()];
-			NewOrExistingInfo.Name = UniqueEnumNameTable.FindOrAdd(ObjAsEnum.GetEnumPrefixedName()).first;
-
-			uint64 EnumMaxValue = 0x0;
-
-			/* Initialize enum-member names and their collision infos */
-			std::vector<std::pair<FName, int64>> NameValuePairs = ObjAsEnum.GetNameValuePairs();
-			for (int i = 0; i < NameValuePairs.size(); i++)
-			{
-				auto& [Name, Value] = NameValuePairs[i];
-
-				UnrealString NameWitPrefix = Name.ToWString();
-
-				if (!NameWitPrefix.ends_with(TEXT("_MAX")))
-					EnumMaxValue = fmax(EnumMaxValue, Value);
-
-				auto [NameIndex, bWasInserted] = UniqueEnumValueNames.FindOrAdd(MakeNameValid(NameWitPrefix.substr(NameWitPrefix.find_last_of(TEXT("::")) + 1)));
-
-				EnumCollisionInfo CurrentEnumValueInfo;
-				CurrentEnumValueInfo.MemberName = NameIndex;
-				CurrentEnumValueInfo.MemberValue = Value;
-
-				if (bWasInserted) [[likely]]
-				{
-					NewOrExistingInfo.MemberInfos.push_back(CurrentEnumValueInfo);
-					continue;
-				}
-
-				/* A value with this name exists globally, now check if it also exists localy (aka. is duplicated) */
-				for (int j = 0; j < i; j++)
-				{
-					EnumCollisionInfo& CrosscheckedInfo = NewOrExistingInfo.MemberInfos[j];
-
-					if (CrosscheckedInfo.MemberName != NameIndex) [[likely]]
-						continue;
-
-					/* Duplicate was found */
-					CurrentEnumValueInfo.CollisionCount = CrosscheckedInfo.CollisionCount + 1;
-					break;
-				}
-
-				/* Check if this name is illegal */
-				for (HashStringTableIndex IllegalIndex : IllegalNames)
-				{
-					if (NameIndex == IllegalIndex) [[unlikely]]
-					{
-						CurrentEnumValueInfo.CollisionCount++;
-						break;
-					}
-				}
-
-				NewOrExistingInfo.MemberInfos.push_back(CurrentEnumValueInfo);
-			}
-
-			/* Initialize the size based on the highest value contained by this enum */
-			if (!NewOrExistingInfo.bWasEnumSizeInitialized && !NewOrExistingInfo.bWasInstanceFound)
-			{
-				EnumInitHelper::SetEnumSizeForValue(NewOrExistingInfo.UnderlyingTypeSize, EnumMaxValue);
-				NewOrExistingInfo.bWasEnumSizeInitialized = true;
-			}
+			InitEnum(Obj.Cast<UEEnum>());
 		}
 	}
+}
+
+EnumInfo& EnumManager::InitEnum(const UEEnum ObjAsEnum)
+{
+	/* Add name to override info */
+	EnumInfo& NewOrExistingInfo = EnumInfoOverrides[ObjAsEnum.GetIndex()];
+	NewOrExistingInfo.Name = UniqueEnumNameTable.FindOrAdd(ObjAsEnum.GetEnumPrefixedName()).first;
+	NewOrExistingInfo.bWasNameInitialized = true;
+	NewOrExistingInfo.MemberInfos.clear();
+
+	uint64 EnumMaxValue = 0x0;
+
+	/* Initialize enum-member names and their collision infos */
+	std::vector<std::pair<FName, int64>> NameValuePairs = ObjAsEnum.GetNameValuePairs();
+	for (int i = 0; i < NameValuePairs.size(); i++)
+	{
+		auto& [Name, Value] = NameValuePairs[i];
+
+		UnrealString NameWitPrefix = Name.ToWString();
+
+		if (!NameWitPrefix.ends_with(TEXT("_MAX")))
+			EnumMaxValue = fmax(EnumMaxValue, Value);
+
+		auto [NameIndex, bWasInserted] = UniqueEnumValueNames.FindOrAdd(MakeNameValid(NameWitPrefix.substr(NameWitPrefix.find_last_of(TEXT("::")) + 1)));
+
+		EnumCollisionInfo CurrentEnumValueInfo;
+		CurrentEnumValueInfo.MemberName = NameIndex;
+		CurrentEnumValueInfo.MemberValue = Value;
+
+		if (bWasInserted) [[likely]]
+		{
+			NewOrExistingInfo.MemberInfos.push_back(CurrentEnumValueInfo);
+			continue;
+		}
+
+		/* A value with this name exists globally, now check if it also exists localy (aka. is duplicated) */
+		for (int j = 0; j < i; j++)
+		{
+			EnumCollisionInfo& CrosscheckedInfo = NewOrExistingInfo.MemberInfos[j];
+
+			if (CrosscheckedInfo.MemberName != NameIndex) [[likely]]
+				continue;
+
+			/* Duplicate was found */
+			CurrentEnumValueInfo.CollisionCount = CrosscheckedInfo.CollisionCount + 1;
+			break;
+		}
+
+		/* Check if this name is illegal */
+		for (HashStringTableIndex IllegalIndex : IllegalNames)
+		{
+			if (NameIndex == IllegalIndex) [[unlikely]]
+			{
+				CurrentEnumValueInfo.CollisionCount++;
+				break;
+			}
+		}
+
+		NewOrExistingInfo.MemberInfos.push_back(CurrentEnumValueInfo);
+	}
+
+	/* Initialize the size based on the highest value contained by this enum */
+	if (!NewOrExistingInfo.bWasEnumSizeInitialized && !NewOrExistingInfo.bWasInstanceFound)
+	{
+		EnumInitHelper::SetEnumSizeForValue(NewOrExistingInfo.UnderlyingTypeSize, EnumMaxValue);
+		NewOrExistingInfo.bWasEnumSizeInitialized = true;
+	}
+
+	return NewOrExistingInfo;
+}
+
+EnumInfo& EnumManager::AddMissingEnum(const UEEnum Enum)
+{
+	if (NumMissingEnums++ < 20)
+		LogError("EnumManager: '%s' (index %d) wasn't part of the object list, it was loaded/unloaded while dumping. Added now.", Enum.GetFullName().c_str(), Enum.GetIndex());
+
+	return InitEnum(Enum);
 }
 
 void EnumManager::InitIllegalNames()

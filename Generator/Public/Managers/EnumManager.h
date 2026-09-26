@@ -45,6 +45,9 @@ private:
 	/* Whether this enums' size was initialized before */
 	bool bWasEnumSizeInitialized = false;
 
+	/* Whether the enum itself was seen (Name and MemberInfos are set), not just a property that uses it */
+	bool bWasNameInitialized = false;
+
 	/* Infos on all members and if there are any collisions between member-names */
 	std::vector<EnumCollisionInfo> MemberInfos;
 };
@@ -110,9 +113,18 @@ private:
 
 	static inline bool bIsInitialized = false;
 
+	/* Number of enums that had to be added after Init(), only the first ones are logged */
+	static inline int32 NumMissingEnums = 0;
+
 private:
 	static void InitInternal();
 	static void InitIllegalNames();
+
+	/* Name, values and (if no property uses the enum) size of an enum */
+	static EnumInfo& InitEnum(const UEEnum Enum);
+
+	/* Info for an enum that Init() didn't see (it wasn't in the object list) */
+	static EnumInfo& AddMissingEnum(const UEEnum Enum);
 
 public:
 	static void Init();
@@ -144,7 +156,12 @@ public:
 		if (!Enum)
 			return {};
 
-		return EnumInfoOverrides.at(Enum.GetIndex());
+		/* Used to be EnumInfoOverrides.at(), an enum Init() didn't see aborted the whole dump ("unordered_map::at: key not found") */
+		auto It = EnumInfoOverrides.find(Enum.GetIndex());
+		if (It == EnumInfoOverrides.end() || !It->second.bWasNameInitialized) [[unlikely]]
+			return AddMissingEnum(Enum);
+
+		return It->second;
 	}
 };
 

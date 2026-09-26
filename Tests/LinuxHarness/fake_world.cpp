@@ -12,11 +12,15 @@
 #include <vector>
 #include <cstdlib>
 #include <algorithm>
+#include <fstream>
+#include <functional>
+#include <unordered_map>
 
 #include <mach-o/loader.h>
 #include <mach-o/dyld.h>
 
 #include "Engine/Public/Unreal/DeltaForce.h"
+#include "Utils/Json/json.hpp"
 
 struct FFakeImage { const mach_header* Header; std::string Name; intptr_t Slide; };
 extern std::vector<FFakeImage> GFakeImages;
@@ -31,6 +35,7 @@ namespace
 
 	uint8_t* Image = nullptr;
 	uint8_t* Heap = nullptr;
+	size_t HeapSize = 0x8000000;
 	size_t HeapUsed = 0;
 	size_t DataUsed = 0;
 
@@ -41,7 +46,7 @@ namespace
 		HeapUsed = (HeapUsed + Align - 1) & ~(Align - 1);
 		const uintptr_t Result = reinterpret_cast<uintptr_t>(Heap) + HeapUsed;
 		HeapUsed += Size;
-		if (HeapUsed > 0x8000000) { fprintf(stderr, "heap exhausted\n"); abort(); }
+		if (HeapUsed > HeapSize) { fprintf(stderr, "heap exhausted\n"); abort(); }
 		return Result;
 	}
 
@@ -54,8 +59,10 @@ namespace
 	}
 
 	/* ---- FNamePool ---- */
-	uintptr_t Pool = 0, Block0 = 0;
-	uint32_t Cursor = 0;
+	constexpr uint32_t NameBlockBytes = 2u << 18; // stride 2, 18 block offset bits
+
+	uintptr_t Pool = 0, Block = 0;
+	uint32_t CurrentBlock = 0, Cursor = 0;
 	std::map<std::string, uint32_t> NameIds;
 
 	uint32_t NameId(const std::string& Name)
@@ -63,33 +70,57 @@ namespace
 		auto It = NameIds.find(Name);
 		if (It != NameIds.end()) return It->second;
 
-		const uint32_t Offset = Cursor;
 		const bool bWide = Name == "\xE6\xB5\x8B\xE8\xAF\x95"; // "测试" -> wide entry
+		const uint32_t EntrySize = bWide ? 2 + 4 : static_cast<uint32_t>((2 + Name.size() + 1) & ~size_t(1));
+
+		if (Cursor + EntrySize > NameBlockBytes)
+		{
+			Block = Alloc(NameBlockBytes, 0x1000);
+			CurrentBlock++;
+			W<uintptr_t>(Pool + 0xC8 + CurrentBlock * 8, Block);
+			W<uint32_t>(Pool + 0x100CC, CurrentBlock);
+			Cursor = 0;
+		}
+
+		const uint32_t Offset = Cursor;
 
 		if (bWide)
 		{
 			uint16_t Text[2] = { 0x6D4B, 0x8BD5 };
 			DeltaForce::DecryptWide(Text, 2); // XOR codec is its own inverse
-			W<uint16_t>(Block0 + Offset, static_cast<uint16_t>((2 << 6) | 1));
-			memcpy(reinterpret_cast<void*>(Block0 + Offset + 2), Text, 4);
-			Cursor += 2 + 4;
+			W<uint16_t>(Block + Offset, static_cast<uint16_t>((2 << 6) | 1));
+			memcpy(reinterpret_cast<void*>(Block + Offset + 2), Text, 4);
 		}
 		else
 		{
 			std::vector<uint8_t> Text(Name.begin(), Name.end());
 			DeltaForce::DecryptAnsi(Text.data(), Text.size());
-			W<uint16_t>(Block0 + Offset, static_cast<uint16_t>(Name.size() << 6));
-			memcpy(reinterpret_cast<void*>(Block0 + Offset + 2), Text.data(), Text.size());
-			Cursor += static_cast<uint32_t>((2 + Name.size() + 1) & ~1u);
+			W<uint16_t>(Block + Offset, static_cast<uint16_t>(Name.size() << 6));
+			memcpy(reinterpret_cast<void*>(Block + Offset + 2), Text.data(), Text.size());
 		}
 
+		Cursor += EntrySize;
 		W<uint32_t>(Pool + 0x100C8, Cursor);
-		return NameIds[Name] = Offset / 2;
+		return NameIds[Name] = (CurrentBlock << 18) | (Offset / 2);
 	}
 
 	/* ---- objects ---- */
-	uintptr_t GObjectsArray = 0, Chunk0 = 0;
+	uintptr_t GObjectsArray = 0, ChunkTable = 0;
+	std::vector<uintptr_t> Chunks;
 	std::vector<uintptr_t> Objects;
+
+	/* FUObjectItem of an object index, chunks of 0x10000 items are allocated when needed */
+	uintptr_t ObjectItem(size_t Index)
+	{
+		const size_t Chunk = Index >> 16;
+		while (Chunks.size() <= Chunk)
+		{
+			Chunks.push_back(Alloc(0x10000 * 0x18, 0x1000));
+			W<uintptr_t>(ChunkTable + (Chunks.size() - 1) * 8, Chunks.back());
+			W<int32_t>(GObjectsArray + 0x18, static_cast<int32_t>(Chunks.size())); // NumChunks
+		}
+		return Chunks[Chunk] + (Index & 0xFFFF) * 0x18;
+	}
 	uintptr_t Vtable = 0;
 
 	constexpr uint32_t RF_Public = 0x1, RF_Native = 0x0, RF_ClassDefaultObject = 0x10;
@@ -109,7 +140,7 @@ namespace
 		W<uint32_t>(Obj + 0x1C, NameId(Name));
 		W<uint32_t>(Obj + 0x20, Number);
 		W<int32_t>(Obj + 0x24, static_cast<int32_t>(Objects.size()));
-		W<uintptr_t>(Chunk0 + Objects.size() * 0x18, Obj);
+		W<uintptr_t>(ObjectItem(Objects.size()), Obj);
 		Objects.push_back(Obj);
 		W<int32_t>(GObjectsArray + 0x14, static_cast<int32_t>(Objects.size()));
 		return Obj;
@@ -174,14 +205,263 @@ namespace
 	}
 
 	uintptr_t TextCode(uint32_t Index) { return reinterpret_cast<uintptr_t>(Image) + 0x8000 + Index * 0x100; }
+
+	/*
+	* DF_HARNESS_WORLD: the object graph of a real dump (make_world.py), rebuilt in the Delta Force layout. Every object keeps its
+	* index, class, outer and name; structs/classes/functions get their super, size, alignment and properties, enums their values.
+	*/
+	void BuildWorldObjects(const char* Path, uintptr_t GWorldPtr)
+	{
+		std::ifstream File(Path);
+		if (!File) { fprintf(stderr, "[harness] can't open %s\n", Path); abort(); }
+
+		const nlohmann::json World = nlohmann::json::parse(File);
+		const nlohmann::json& JObjects = World.at("objects");
+		const nlohmann::json& JStructs = World.at("structs");
+		const nlohmann::json& JFunctions = World.at("functions");
+		const nlohmann::json& JEnums = World.at("enums");
+
+		const size_t Num = JObjects.size();
+
+		std::vector<int32_t> StructSize(Num, 0);
+		for (const auto& [Key, Value] : JStructs.items())
+			StructSize[std::stoul(Key)] = Value[1].get<int32_t>();
+
+		/* 1. every object at its index, null slots stay empty */
+		std::vector<uintptr_t> Addr(Num, 0);
+		for (size_t i = 0; i < Num; i++)
+		{
+			const nlohmann::json& O = JObjects[i];
+
+			if (O.is_null())
+			{
+				ObjectItem(Objects.size());
+				Objects.push_back(0);
+				continue;
+			}
+
+			const std::string Key = std::to_string(i);
+			const int64_t ClassIdx = O[0].get<int64_t>();
+
+			size_t Size = 0x40;
+			if (JFunctions.contains(Key))
+				Size = 0xE0;
+			else if (JStructs.contains(Key))
+				Size = ClassSize;
+			else if (JEnums.contains(Key))
+				Size = 0x60;
+			else if (ClassIdx >= 0)
+				Size = std::max<int32_t>(StructSize[ClassIdx], 0x28) + 0x40;
+
+			Addr[i] = NewObject(Size, 0, 0, O[2].get<std::string>(), O[3].get<uint32_t>());
+		}
+		W<int32_t>(GObjectsArray + 0x14, static_cast<int32_t>(Objects.size()));
+
+		auto At = [&](const nlohmann::json& Index) -> uintptr_t
+		{
+			const int64_t I = Index.get<int64_t>();
+			return I >= 0 && static_cast<size_t>(I) < Num ? Addr[I] : 0;
+		};
+
+		auto PackageOf = [&](size_t Index) -> uintptr_t
+		{
+			for (int Depth = 0; Depth < 64; Depth++)
+			{
+				const int64_t Outer = JObjects[Index][1].get<int64_t>();
+				if (Outer < 0)
+					return Addr[Index];
+				Index = static_cast<size_t>(Outer);
+			}
+			return 0;
+		};
+
+		/* 2. class + outer */
+		uintptr_t DelegateFunctionClass = 0;
+		for (size_t i = 0; i < Num; i++)
+		{
+			if (!Addr[i])
+				continue;
+
+			SetClass(Addr[i], At(JObjects[i][0]));
+			W<uintptr_t>(Addr[i] + 0x10, At(JObjects[i][1]));
+
+			if (!DelegateFunctionClass && JObjects[i][2] == "DelegateFunction" && JStructs.contains(std::to_string(i)))
+				DelegateFunctionClass = Addr[i];
+		}
+
+		/* 3. properties. Delegate properties get a DelegateFunction with the parameters of their signature. */
+		uint32_t CodeIndex = 0, NumSignatures = 0, NumProperties = 0;
+
+		std::function<uintptr_t(uintptr_t, bool, const nlohmann::json&, uintptr_t)> MakeProperty;
+
+		auto MakeSignature = [&](const nlohmann::json& Params, uintptr_t Package) -> uintptr_t
+		{
+			const uintptr_t F = NewObject(0xE0, DelegateFunctionClass, Package, "HarnessSignature" + std::to_string(NumSignatures++) + "__DelegateSignature");
+
+			int32_t ParmsSize = 0;
+			uintptr_t* Link = reinterpret_cast<uintptr_t*>(F + ChildPropertiesOffset);
+			for (const nlohmann::json& Param : Params)
+			{
+				const uintptr_t P = MakeProperty(F, true, Param, Package);
+				*Link = P;
+				Link = reinterpret_cast<uintptr_t*>(P + 0x18);
+				ParmsSize = std::max(ParmsSize, Param.value("o", 0) + Param.value("s", 0));
+			}
+
+			StructInfo(F, 0, ParmsSize, 8);
+			W<uint32_t>(F + 0xB8, 0x00100000 | 0x00020000 | 0x00010000); // Delegate | Public | MulticastDelegate
+			W<uint8_t>(F + 0xB0, static_cast<uint8_t>(Params.size()));
+			W<uint16_t>(F + 0xB2, static_cast<uint16_t>(ParmsSize));
+			W<uintptr_t>(F + 0xD8, TextCode(0x100 + (CodeIndex++ % 0xE00)));
+			return F;
+		};
+
+		MakeProperty = [&](uintptr_t Owner, bool bOwnerIsUObject, const nlohmann::json& P, uintptr_t Package) -> uintptr_t
+		{
+			NumProperties++;
+
+			const uintptr_t Prop = NewProperty(Owner, bOwnerIsUObject, P.at("k").get<std::string>(), P.value("n", std::string("Inner")), P.value("s", 0), P.value("o", 0),
+				P.value("f", uint64_t(0)), P.value("d", 1));
+
+			if (P.contains("struct")) W<uintptr_t>(Prop + 0x88, At(P["struct"]));
+			if (P.contains("cls"))    W<uintptr_t>(Prop + 0x88, At(P["cls"]));
+			if (P.contains("meta"))   W<uintptr_t>(Prop + 0x90, At(P["meta"]));
+			if (P.contains("enum"))   W<uintptr_t>(Prop + 0x88, At(P["enum"]));
+			if (P.contains("under"))  W<uintptr_t>(Prop + 0x80, MakeProperty(Prop, false, P["under"], Package));
+			if (P.contains("inner"))  W<uintptr_t>(Prop + 0x88, MakeProperty(Prop, false, P["inner"], Package));
+			if (P.contains("elem"))   W<uintptr_t>(Prop + 0x80, MakeProperty(Prop, false, P["elem"], Package));
+			if (P.contains("key"))    W<uintptr_t>(Prop + 0x88, MakeProperty(Prop, false, P["key"], Package));
+			if (P.contains("val"))    W<uintptr_t>(Prop + 0x90, MakeProperty(Prop, false, P["val"], Package));
+			if (P.contains("sig"))    W<uintptr_t>(Prop + 0x88, MakeSignature(P["sig"], Package));
+			if (P.contains("field"))  W<uintptr_t>(Prop + 0x88, FieldClass(P["field"].get<std::string>()));
+			if (P.contains("bool"))
+			{
+				const nlohmann::json& B = P["bool"];
+				W<uint32_t>(Prop + 0x81, B[0].get<uint32_t>() | (B[1].get<uint32_t>() << 8) | (B[2].get<uint32_t>() << 16) | (B[3].get<uint32_t>() << 24));
+			}
+			return Prop;
+		};
+
+		for (const auto& [Key, S] : JStructs.items())
+		{
+			const size_t i = std::stoul(Key);
+			const uintptr_t Struct = Addr[i];
+
+			if (!Struct)
+				continue;
+
+			StructInfo(Struct, At(S[0]), S[1].get<int32_t>(), std::max(S[2].get<int32_t>(), 1));
+
+			const uintptr_t Package = PackageOf(i);
+			uintptr_t* Link = reinterpret_cast<uintptr_t*>(Struct + ChildPropertiesOffset);
+			for (const nlohmann::json& P : S[3])
+			{
+				const uintptr_t Prop = MakeProperty(Struct, true, P, Package);
+				*Link = Prop;
+				Link = reinterpret_cast<uintptr_t*>(Prop + 0x18);
+			}
+		}
+
+		/* 4. functions: flags, parameters, code, and linked into the Children of their class */
+		std::unordered_map<uintptr_t, uintptr_t*> ChildrenTail;
+		for (const auto& [Key, Flags] : JFunctions.items())
+		{
+			const size_t i = std::stoul(Key);
+			const uintptr_t F = Addr[i];
+
+			if (!F)
+				continue;
+
+			const nlohmann::json& S = JStructs.at(Key);
+			W<uint32_t>(F + 0xB8, Flags.get<uint32_t>());
+			W<uint8_t>(F + 0xB0, static_cast<uint8_t>(S[3].size()));
+			W<uint16_t>(F + 0xB2, static_cast<uint16_t>(S[1].get<int32_t>()));
+			W<uintptr_t>(F + 0xD8, TextCode(0x100 + (CodeIndex++ % 0xE00)));
+
+			const int64_t Outer = JObjects[i][1].get<int64_t>();
+			if (Outer < 0 || !JStructs.contains(std::to_string(Outer)))
+				continue;
+
+			uintptr_t*& Tail = ChildrenTail[Addr[Outer]];
+			if (!Tail)
+				Tail = reinterpret_cast<uintptr_t*>(Addr[Outer] + 0x50);
+			*Tail = F;
+			Tail = reinterpret_cast<uintptr_t*>(F + 0x28);
+		}
+
+		/* 5. enum values */
+		for (const auto& [Key, Values] : JEnums.items())
+		{
+			const uintptr_t E = Addr[std::stoul(Key)];
+			const uintptr_t Data = Alloc(16 * std::max<size_t>(Values.size(), 1));
+
+			for (size_t v = 0; v < Values.size(); v++)
+			{
+				W<uint32_t>(Data + v * 16, NameId(Values[v][0].get<std::string>()));
+				W<int64_t>(Data + v * 16 + 8, Values[v][1].get<int64_t>());
+			}
+			W<uintptr_t>(E + 0x40, Data);
+			W<int32_t>(E + 0x48, static_cast<int32_t>(Values.size()));
+			W<int32_t>(E + 0x4C, static_cast<int32_t>(Values.size()));
+		}
+
+		/* 6. UClass::ClassDefaultObject, a few real cast flags (the finder only reports the offset), GWorld */
+		for (size_t i = 0; i < Num; i++)
+		{
+			if (!Addr[i] || JObjects[i][2].get<std::string>().rfind("Default__", 0) != 0)
+				continue;
+
+			const int64_t ClassIdx = JObjects[i][0].get<int64_t>();
+			if (ClassIdx >= 0 && JStructs.contains(std::to_string(ClassIdx)))
+				W<uintptr_t>(Addr[ClassIdx] + 0x118, Addr[i]);
+		}
+		for (size_t i = 0; i < Num; i++)
+		{
+			if (!Addr[i] || !JStructs.contains(std::to_string(i)))
+				continue;
+
+			if (JObjects[i][2] == "Actor")
+				W<uint64_t>(Addr[i] + 0xE0, 0x0000001000000000ULL);
+			else if (JObjects[i][2] == "Class")
+				W<uint64_t>(Addr[i] + 0xE0, 0x1 | 0x8 | 0x20);
+		}
+
+		if (const int64_t WorldIdx = World.value("world", int64_t(-1)); WorldIdx >= 0)
+			W<uintptr_t>(GWorldPtr, Addr[WorldIdx]);
+
+		W<int32_t>(GObjectsArray + 0x14, static_cast<int32_t>(Objects.size()));
+		printf("[harness] world: %zu objects (%u delegate signatures added), %u properties\n", Objects.size(), NumSignatures, NumProperties);
+	}
 }
 
 uintptr_t GFakeWorld = 0;
 
+/* Like a garbage collection: every Nth object (not the first ones, which are the engine's own classes) leaves the object array */
+void HarnessUnloadObjects(int EveryNth)
+{
+	if (EveryNth <= 0)
+		return;
+
+	int NumUnloaded = 0;
+	for (size_t i = std::min<size_t>(0x1000, Objects.size() / 2); i < Objects.size(); i += EveryNth)
+	{
+		if (!Objects[i])
+			continue;
+
+		W<uintptr_t>(ObjectItem(i), 0);
+		NumUnloaded++;
+	}
+
+	printf("[harness] unloaded %d objects\n", NumUnloaded);
+}
+
 void BuildFakeDeltaForce()
 {
 	Image = static_cast<uint8_t*>(mmap(nullptr, ImageSize, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
-	Heap = static_cast<uint8_t*>(mmap(nullptr, 0x8000000, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
+	/* DF_HARNESS_WORLD=<world.json> (make_world.py): rebuild the object graph of a real dump instead of the synthetic objects */
+	const char* WorldFile = getenv("DF_HARNESS_WORLD");
+	HeapSize = WorldFile ? 0x80000000 : 0x8000000;
+	Heap = static_cast<uint8_t*>(mmap(nullptr, HeapSize, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0));
 
 	/* Mach-O header + segments */
 	auto* Header = reinterpret_cast<mach_header_64*>(Image);
@@ -221,23 +501,29 @@ void BuildFakeDeltaForce()
 	for (uint32_t i = 0; i < 0x80; i++) W<uintptr_t>(Vtable + i * 8, TextCode(i));
 
 	Pool = DataAlloc(0x100D0, 64);
-	Block0 = Alloc(0x80000, 0x1000);
-	W<uintptr_t>(Pool + 0xC8, Block0);
+	Block = Alloc(NameBlockBytes, 0x1000);
+	W<uintptr_t>(Pool + 0xC8, Block);
 	W<uint32_t>(Pool + 0x100CC, 0); // CurrentBlock
 	NameId("None");
 	NameId("ByteProperty");
 
 	GObjectsArray = DataAlloc(0x80, 64);
-	Chunk0 = Alloc(0x10000 * 0x18, 0x1000);
-	const uintptr_t ChunkTable = Alloc(0x100 * 8);
-	W<uintptr_t>(ChunkTable, Chunk0);
+	ChunkTable = Alloc(0x100 * 8);
 	/* Like the real game: +0x10 looks like MaxChunks, MaxElements can't be identified (TUObjectArray must not get two members at 0x14) */
 	W<int32_t>(GObjectsArray + 0x10, 0x21);     // MaxChunks
-	W<int32_t>(GObjectsArray + 0x18, 1);        // NumChunks
 	W<int32_t>(GObjectsArray + 0x1C, 0x0);      // unknown
 	W<uintptr_t>(GObjectsArray + 0x20, ChunkTable);
+	ObjectItem(0);                              // NumChunks = 1
 
 	const uintptr_t GWorldPtr = DataAlloc(8, 8);
+
+	if (WorldFile)
+	{
+		BuildWorldObjects(WorldFile, GWorldPtr);
+
+		printf("[harness] world %s: image %p, %zu objects, %zu names, %u name blocks\n", WorldFile, Image, Objects.size(), NameIds.size(), CurrentBlock + 1);
+		return;
+	}
 
 	/* ---- CoreUObject ---- */
 	const uintptr_t CoreUObject = NewObject(0x40, 0, 0, "/Script/CoreUObject");

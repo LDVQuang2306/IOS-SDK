@@ -204,14 +204,8 @@ void StructManager::InitSizesAndIsFinal()
 		{
 			auto It = StructInfoOverrides.find(S.GetIndex());
 
-			if (It == StructInfoOverrides.end())
-			{
-                LogError("\n\n\nDumper-7: Error, struct wasn't found in 'StructInfoOverrides'! Exiting...\n\n\n");
-				std::this_thread::sleep_for(std::chrono::seconds(10000));
-				exit(1);
-			}
-
-			StructInfo& Info = It->second;
+			/* Was an endless sleep + exit(1), which hung the dump thread forever */
+			StructInfo& Info = It != StructInfoOverrides.end() ? It->second : AddMissingStruct(S);
 
 			// Struct is not final, as it is another structs' super
 			Info.bIsFinal = false;
@@ -233,6 +227,60 @@ void StructManager::InitSizesAndIsFinal()
 	}
 }
 
+StructInfo& StructManager::AddMissingStruct(const UEStruct Struct)
+{
+	constexpr int32 DefaultClassAlignment = 0x8;
+
+	if (NumMissingStructs++ < 20)
+	{
+		LogError("StructManager: '%s' (index %d) wasn't part of the object list, it was loaded/unloaded while dumping. Added now.",
+			Struct.GetFullName().c_str(), Struct.GetIndex());
+	}
+
+	StructInfo& Info = StructInfoOverrides[Struct.GetIndex()];
+	Info.Name = UniqueNameTable.FindOrAdd(Struct.GetCppName(), !Struct.IsA(EClassCastFlags::Function)).first;
+
+	static const UEClass InterfaceClass = ObjectArray::FindClassFast("Interface");
+
+	if (InterfaceClass && Struct.HasType(InterfaceClass))
+	{
+		Info.Alignment = 0x1;
+		Info.Size = 0x0;
+		Info.bIsFinal = true;
+		Info.bHasReusedTrailingPadding = false;
+		return Info;
+	}
+
+	int32 HighestMemberAlignment = 0x1;
+	int32 LastMemberEnd = 0x0;
+
+	for (UEProperty Property : Struct.GetProperties())
+	{
+		HighestMemberAlignment = std::max(HighestMemberAlignment, Property.GetAlignment());
+		LastMemberEnd = std::max(LastMemberEnd, Property.GetOffset() + Property.GetSize());
+	}
+
+	const int32 MinAlignment = Struct.GetMinAlignment();
+
+	if (Struct.IsA(EClassCastFlags::Class) && Struct.GetSuper() && HighestMemberAlignment < DefaultClassAlignment)
+	{
+		Info.bUseExplicitAlignment = false;
+		Info.Alignment = DefaultClassAlignment;
+	}
+	else
+	{
+		Info.bUseExplicitAlignment = MinAlignment > HighestMemberAlignment;
+		Info.Alignment = std::max(MinAlignment, HighestMemberAlignment);
+	}
+
+	Info.Size = Struct.GetStructSize();
+	if (Info.Size == 0x0 && Struct.GetSuper())
+		Info.Size = Struct.GetSuper().GetStructSize();
+
+	Info.LastMemberEnd = LastMemberEnd;
+	return Info;
+}
+
 void StructManager::Init()
 {
 	if (bIsInitialized)
@@ -249,10 +297,19 @@ void StructManager::Init()
 	* The default class-alignment of 0x8 is only set for classes with a valid Super-class, because they inherit from UObject. 
 	* UObject however doesn't have a super, so this needs to be set manually.
 	*/
-	const UEObject UObjectClass = ObjectArray::FindClassFast("Object");
-	StructInfoOverrides.find(UObjectClass.GetIndex())->second.Alignment = 0x8;
+	if (const UEStruct UObjectClass = ObjectArray::FindClassFast("Object"))
+	{
+		GetInfo(UObjectClass);
+		StructInfoOverrides[UObjectClass.GetIndex()].Alignment = 0x8;
+	}
 
 	/* I still hate whoever decided to call "UStruct" "Ustruct" on some UE versions. */
-	if (const UEObject UStructClass = ObjectArray::FindClassFast("struct"))
-		StructInfoOverrides.find(UStructClass.GetIndex())->second.Name = UniqueNameTable.FindOrAdd(std::string("UStruct"), false).first;
+	if (const UEStruct UStructClass = ObjectArray::FindClassFast("struct"))
+	{
+		GetInfo(UStructClass);
+		StructInfoOverrides[UStructClass.GetIndex()].Name = UniqueNameTable.FindOrAdd(std::string("UStruct"), false).first;
+	}
+
+	if (NumMissingStructs > 0)
+		LogError("StructManager: %d structs had to be added after the object list was read", NumMissingStructs);
 }

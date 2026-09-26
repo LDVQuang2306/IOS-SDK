@@ -18,8 +18,33 @@ static std::string GetTimeStr() {
 }
 
 void Console::push(const std::string& text, int type) {
+    const std::string time = GetTimeStr();
+
     std::lock_guard<std::mutex> lock(logMutex);
-    outputArr.push_back({ text, GetTimeStr(), type });
+
+    /*
+    * One entry per line: the list clipper in Render() expects every entry to be one line high. Messages like "GameName: X\n" or
+    * "\n\nGenerating SDK took ..." were drawn taller than that, so the end of the log was cut off and the newest lines were hidden.
+    */
+    size_t start = 0;
+    while (start <= text.size())
+    {
+        size_t end = text.find('\n', start);
+        if (end == std::string::npos)
+            end = text.size();
+
+        std::string line = text.substr(start, end - start);
+        if (!line.empty() && line.back() == '\r')
+            line.pop_back();
+
+        if (!line.empty())
+        {
+            outputArr.push_back({ std::move(line), time, type });
+            totalLines++;
+        }
+
+        start = end + 1;
+    }
 
     while (outputArr.size() > MaxLines)
         outputArr.pop_front();
@@ -50,20 +75,18 @@ std::string Console::GetAllText() {
 void Console::clearLogs() {
     std::lock_guard<std::mutex> lock(logMutex);
     outputArr.clear();
+    autoScroll = true;
 }
 
 void Console::Render() {
     // Log controls: Clear and Auto-scroll
     if (ImGui::Button("Clear")) clearLogs();
     ImGui::SameLine();
-    // Assuming 'autoScroll' is a public member of Console
     ImGui::Checkbox("Auto-scroll", &autoScroll);
     ImGui::Separator();
 
-    // Log display area (Scrolling Region)
-    float footer_height_to_reserve = ImGui::GetStyle().ItemSpacing.y + ImGui::GetFrameHeightWithSpacing();
-    // BeginChild creates the scrollable area, filling the remaining vertical space
-    ImGui::BeginChild("ScrollingRegion", ImVec2(0, -footer_height_to_reserve), false, ImGuiWindowFlags_HorizontalScrollbar);
+    // Log display area, fills the rest of the window (it used to reserve room for a footer that doesn't exist)
+    ImGui::BeginChild("ScrollingRegion", ImVec2(0, 0), false, ImGuiWindowFlags_HorizontalScrollbar);
 
     {
         std::lock_guard<std::mutex> lock(logMutex);
@@ -100,9 +123,18 @@ void Console::Render() {
 
         ImGui::PopStyleVar();
 
-        // Auto-scroll logic
-        if (autoScroll && ImGui::GetScrollY() >= ImGui::GetScrollMaxY())
+        /* Dragging the log (or its scrollbar) up pauses auto-scroll, dragging it back to the end resumes it */
+        const bool bAtBottom = ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - ImGui::GetTextLineHeightWithSpacing();
+        const bool bUserScrolls = ImGui::IsWindowHovered() && (ImGui::IsMouseDragging(ImGuiMouseButton_Left) || ImGui::GetIO().MouseWheel != 0.0f);
+
+        if (bUserScrolls)
+            autoScroll = bAtBottom;
+
+        /* The cursor is behind the last line here: keep the newest line at the bottom of the view whenever lines were added */
+        if (autoScroll && (renderedLines != totalLines || !bAtBottom))
             ImGui::SetScrollHereY(1.0f);
+
+        renderedLines = totalLines;
     }
     
     ImGui::EndChild();

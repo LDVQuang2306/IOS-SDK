@@ -31,6 +31,10 @@ public:
 private:
 	static inline void*(*ByIndex)(void* ObjectsArray, int32 Index, uint32 FUObjectItemSize, uint32 FUObjectItemOffset, uint32 PerChunk) = nullptr;
 
+	/* Object of every index when CreateSnapshot() was called, used by Num()/GetByIndex() from then on */
+	static inline std::vector<void*> Snapshot;
+	static inline bool bUseSnapshot = false;
+
 	static inline uint8_t* (*DecryptPtr)(void* ObjPtr) = [](void* Ptr) -> uint8* { return static_cast<uint8*>(Ptr); };
 
 private:
@@ -49,6 +53,16 @@ public:
 	static void InitWithKnownLayout(uint8* GObjectsAddress, int32 GObjectsOffset, int32 ElementsPerChunk, const FChunkedFixedUObjectArrayLayout& ObjectArrayLayout, uint32 ItemSize, uint32 ItemObjectOffset);
 
 	static inline bool IsInitialized() { return GObjects != nullptr && ByIndex != nullptr; }
+
+	/*
+	* The game keeps running while the SDK is generated, objects are loaded and garbage collected in the meantime. Every manager
+	* (PackageManager, StructManager, EnumManager, MemberManager) walks the object list on its own, without a snapshot they could each
+	* see a different set of objects ("unordered_map::at: key not found"). After this call Num()/GetByIndex() return the snapshot.
+	*/
+	static void CreateSnapshot();
+
+	/* Whether the object at this index still is the object of the snapshot (it wasn't garbage collected since) */
+	static bool IsStillAlive(int32 Index);
 
 	static void DumpObjects(const fs::path& Path, bool bWithPathname = false);
 	static void DumpObjectsWithProperties(const fs::path& Path, bool bWithPathname = false);

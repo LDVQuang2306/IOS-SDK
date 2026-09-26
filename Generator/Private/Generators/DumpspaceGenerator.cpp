@@ -39,7 +39,8 @@ std::string DumpspaceGenerator::EnumSizeToType(const int32 Size)
 		"uint64"
 	};
 
-	return Size <= 0x8 ? UnderlayingTypesBySize[static_cast<size_t>(Size) - 1] : "uint8";
+	/* Size 0 (an enum property with ElementSize 0) indexed the array with -1 and constructed a std::string from garbage */
+	return Size >= 0x1 && Size <= 0x8 ? UnderlayingTypesBySize[static_cast<size_t>(Size) - 1] : "uint8";
 }
 
 DSGen::EType DumpspaceGenerator::GetMemberEType(const PropertyWrapper& Property)
@@ -473,14 +474,21 @@ void DumpspaceGenerator::Generate()
 		*
 		* Note: Some filestreams aren't opened but passed as parameters anyway because the function demands it, they are not used if they are closed
 		*/
+		/* Objects the game garbage collected since the generator's snapshot are skipped */
 		for (int32 EnumIdx : Package.GetEnums())
 		{
+			if (!ObjectArray::IsStillAlive(EnumIdx))
+				continue;
+
 			DSGen::EnumHolder Enum = GenerateEnum(ObjectArray::GetByIndex<UEEnum>(EnumIdx));
 			DSGen::bakeEnum(Enum);
 		}
 
 		DependencyManager::OnVisitCallbackType GenerateClassOrStructCallback = [&](int32 Index) -> void
 		{
+			if (!ObjectArray::IsStillAlive(Index))
+				return;
+
 			DSGen::ClassHolder StructOrClass = GenerateStruct(ObjectArray::GetByIndex<UEStruct>(Index));
 			DSGen::bakeStructOrClass(StructOrClass);
 		};

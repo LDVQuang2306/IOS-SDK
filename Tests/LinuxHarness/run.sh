@@ -5,6 +5,9 @@
 #   3. compiles the generated SDK and uses it to read the synthetic image back
 #   4. optional: IOS_SDK=/path/to/iPhoneOS.sdk also compiles the generated SDK for arm64-apple-ios
 set -e
+# The synthetic runs below must not pick up a real world (DF_HARNESS_WORLD is only used by the last step)
+WORLD="$DF_HARNESS_WORLD"
+unset DF_HARNESS_WORLD
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/../.." && pwd)"
 BUILD="$HERE/build"
@@ -62,5 +65,20 @@ for f in Basic.cpp CoreUObject_functions.cpp; do
     clang++ -target arm64-apple-ios14.0 -isysroot "$IOS_SDK" -std=c++20 -fsyntax-only -w -I"$NOFLAGS_SDK" -I"$NOFLAGS_SDK/SDK" "$NOFLAGS_SDK/SDK/$f"
   fi
 done
+
+echo "[run.sh] objects garbage collected while dumping (right after the snapshot / while writing the SDK): the dump has to finish"
+for MODE in DF_HARNESS_UNLOAD DF_HARNESS_UNLOAD_LATE; do
+  rm -rf "$BUILD/home_gc" && mkdir -p "$BUILD/home_gc/Documents"
+  env HOME="$BUILD/home_gc" ASAN_OPTIONS=detect_leaks=0 $MODE=7 "$BUILD/harness" > "$BUILD/harness_gc.log" 2>&1 || { tail -20 "$BUILD/harness_gc.log"; exit 1; }
+  grep -q "HARNESS DONE" "$BUILD/harness_gc.log"
+  echo "$MODE: $(grep -m1 'unloaded' "$BUILD/harness_gc.log")"
+done
+
+if [ -n "$WORLD" ]; then
+  echo "[run.sh] dumping the object graph of a real game ($WORLD, see make_world.py)"
+  rm -rf "$BUILD/home_world" && mkdir -p "$BUILD/home_world/Documents"
+  HOME="$BUILD/home_world" ASAN_OPTIONS=detect_leaks=0 DF_HARNESS_WORLD="$WORLD" "$BUILD/harness" > "$BUILD/harness_world.log" 2>&1 || { tail -20 "$BUILD/harness_world.log"; exit 1; }
+  grep -E "Generator:|PackageManager:|HARNESS" "$BUILD/harness_world.log"
+fi
 
 echo "[run.sh] OK"

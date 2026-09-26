@@ -5,6 +5,7 @@
 #include <unordered_set>
 
 #include "../../../Engine/Public/Unreal/UnrealObjects.h"
+#include "../../../Engine/Public/Unreal/ObjectArray.h"
 #include "../HashStringTable.h"
 
 
@@ -97,9 +98,15 @@ private:
 
 	static inline bool bIsInitialized = false;
 
+	/* Number of structs that had to be added after Init(), only the first ones are logged */
+	static inline int32 NumMissingStructs = 0;
+
 private:
 	static void InitAlignmentsAndNames();
 	static void InitSizesAndIsFinal();
+
+	/* Info for a struct that Init() didn't see (it wasn't in the object list), computed like Init() does for a single struct */
+	static StructInfo& AddMissingStruct(const UEStruct Struct);
 
 public:
 	static void Init();
@@ -132,7 +139,12 @@ public:
 		if (!Struct)
 			return {};
 
-		return StructInfoOverrides.at(Struct.GetIndex());
+		/* Lookups used to be StructInfoOverrides.at(), a struct Init() didn't see aborted the whole dump ("unordered_map::at: key not found") */
+		auto It = StructInfoOverrides.find(Struct.GetIndex());
+		if (It == StructInfoOverrides.end()) [[unlikely]]
+			return AddMissingStruct(Struct);
+
+		return It->second;
 	}
 
 	static inline bool IsStructCyclicWithPackage(int32 StructIndex, int32 PackageIndex)
@@ -151,7 +163,8 @@ public:
 	*/
 	static inline void PackageManagerSetCycleForStruct(int32 StructIndex, int32 PackageIndex)
 	{
-		StructInfo& Info = StructInfoOverrides.at(StructIndex);
+		auto It = StructInfoOverrides.find(StructIndex);
+		StructInfo& Info = It != StructInfoOverrides.end() ? It->second : AddMissingStruct(ObjectArray::GetByIndex<UEStruct>(StructIndex));
 
 		Info.bIsPartOfCyclicPackage = true;
 

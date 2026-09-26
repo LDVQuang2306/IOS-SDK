@@ -1,5 +1,6 @@
 #include <cstdio>
 #include <cstdlib>
+#include <exception>
 #include "Generator/Public/Generators/CppGenerator.h"
 #include "Generator/Public/Generators/MappingGenerator.h"
 #include "Generator/Public/Generators/IDAMappingGenerator.h"
@@ -9,20 +10,30 @@
 
 void BuildFakeDeltaForce();
 
+/* Same sequence as RunDump()/DumpThreadEntry() in main.mm */
 int main()
 {
     BuildFakeDeltaForce();
 
-    if (!Generator::InitEngineCore()) { printf("InitEngineCore FAILED\n"); return 1; }
+    try
+    {
+        if (!Generator::InitEngineCore()) { printf("InitEngineCore FAILED\n"); return 1; }
 
-    Settings::Generator::GameName = "DeltaForce";
-    Settings::Generator::GameVersion = "1.0.0_Test";
+        Settings::Generator::GameName = "DeltaForce";
+        Settings::Generator::GameVersion = "1.0.0_Test";
 
-    Generator::InitInternal();
-    Generator::Generate<CppGenerator>();
-    Generator::Generate<MappingGenerator>();
-    Generator::Generate<IDAMappingGenerator>();
-    Generator::Generate<DumpspaceGenerator>();
+        Generator::InitInternal();
+        Generator::Generate<CppGenerator>();
+        Generator::Generate<MappingGenerator>();
+        Generator::Generate<IDAMappingGenerator>();
+        Generator::Generate<DumpspaceGenerator>();
+    }
+    catch (const std::exception& Exception)
+    {
+        printf("[E] Dump failed with an exception: %s\n", Exception.what());
+        return 2;
+    }
+
     printf("HARNESS DONE\n");
     return 0;
 }

@@ -11,6 +11,7 @@
 #include "../../Public/Managers/MemberManager.h"
 
 #include "../../../Settings.h"
+#include "../../../Menu/Logger.h"
 
 inline std::string GetTypeFromSize(uint8 Size)
 {
@@ -1568,6 +1569,20 @@ void CppGenerator::WriteFileEnd(StreamType& File, EFileType Type)
     File.close();
 }
 
+/* The game keeps running while dumping: an object that was garbage collected since the snapshot is skipped instead of reading freed memory */
+static bool WasUnloadedWhileDumping(int32 Index)
+{
+	if (ObjectArray::IsStillAlive(Index))
+		return false;
+
+	static int32 NumSkipped = 0;
+
+	if (NumSkipped++ < 20)
+		LogError("CppGenerator: object %d was unloaded by the game while dumping and is skipped (dump again if it's needed)", Index);
+
+	return true;
+}
+
 void CppGenerator::Generate()
 {
 	// Generate SDK.hpp with sorted packages
@@ -1673,7 +1688,8 @@ void CppGenerator::Generate()
 		*/
 		for (int32 EnumIdx : Package.GetEnums())
 		{
-			GenerateEnum(ObjectArray::GetByIndex<UEEnum>(EnumIdx), StructsFile);
+			if (!WasUnloadedWhileDumping(EnumIdx))
+				GenerateEnum(ObjectArray::GetByIndex<UEEnum>(EnumIdx), StructsFile);
 		}
 
 		if (Package.HasStructs())
@@ -1682,7 +1698,8 @@ void CppGenerator::Generate()
 
 			DependencyManager::OnVisitCallbackType GenerateStructCallback = [&](int32 Index) -> void
 			{
-				GenerateStruct(ObjectArray::GetByIndex<UEStruct>(Index), StructsFile, FunctionsFile, ParametersFile, PackageIndex);
+				if (!WasUnloadedWhileDumping(Index))
+					GenerateStruct(ObjectArray::GetByIndex<UEStruct>(Index), StructsFile, FunctionsFile, ParametersFile, PackageIndex);
 			};
 
 			Structs.VisitAllNodesWithCallback(GenerateStructCallback);
@@ -1694,7 +1711,8 @@ void CppGenerator::Generate()
 
 			DependencyManager::OnVisitCallbackType GenerateClassCallback = [&](int32 Index) -> void
 			{
-				GenerateStruct(ObjectArray::GetByIndex<UEStruct>(Index), ClassesFile, FunctionsFile, ParametersFile, PackageIndex);
+				if (!WasUnloadedWhileDumping(Index))
+					GenerateStruct(ObjectArray::GetByIndex<UEStruct>(Index), ClassesFile, FunctionsFile, ParametersFile, PackageIndex);
 			};
 
 			Classes.VisitAllNodesWithCallback(GenerateClassCallback);

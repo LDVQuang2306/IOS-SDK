@@ -258,6 +258,10 @@ public:
 	static void IterateDependencies(const IteratePackagesCallbackType& CallbackForEachPackage);
 	static void FindCycle(const FindCycleCallbackType& OnFoundCycle);
 
+private:
+	/* Empty info (with a name) for a package that has no entry, kept separately so PackageInfos is never modified while it's iterated */
+	static const PackageInfo& GetMissingPackageInfo(int32 PackageIndex);
+
 public:
 	static inline const OverrideMaptType& GetPackageInfos()
 	{
@@ -276,7 +280,12 @@ public:
 
 	static inline PackageInfoHandle GetInfo(int32 PackageIndex)
 	{
-		return PackageInfos.at(PackageIndex);
+		/* Used to be PackageInfos.at(), a package without entry aborted the whole dump ("unordered_map::at: key not found") */
+		auto It = PackageInfos.find(PackageIndex);
+		if (It == PackageInfos.end()) [[unlikely]]
+			return GetMissingPackageInfo(PackageIndex);
+
+		return It->second;
 	}
 
 	static inline PackageInfoHandle GetInfo(const UEObject Package)
@@ -284,7 +293,7 @@ public:
 		if (!Package)
 			return {};
 
-		return PackageInfos.at(Package.GetIndex());
+		return GetInfo(Package.GetIndex());
 	}
 
 	static inline PackageInfoIterator IterateOverPackageInfos()

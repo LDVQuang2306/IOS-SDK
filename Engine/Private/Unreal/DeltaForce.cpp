@@ -381,10 +381,11 @@ namespace
 		return true;
 	}
 
-	/* RF_ClassDefaultObject must be set on every "Default__" object and (almost) nowhere else */
+	/* RF_ClassDefaultObject must be set on every "Default__" object and nowhere else */
 	int32 FindObjectFlagsOffset()
 	{
-		const int32 NumObjects = std::min(ObjectArray::Num(), 0x10000);
+		/* All objects: CDOs are created late, the first 0x10000 objects only contain a handful of them */
+		const int32 NumObjects = ObjectArray::Num();
 
 		std::vector<std::pair<uint8*, bool>> Objects;
 		Objects.reserve(NumObjects);
@@ -417,8 +418,14 @@ namespace
 				(bIsCDO ? NumCDOsWithFlag : NumOthersWithFlag) += bHasFlag;
 			}
 
-			/* Tolerate a few objects that are still being constructed/destroyed while the dump runs */
-			if (NumCDOs >= 16 && NumCDOsWithFlag * 100 >= NumCDOs * 99 && NumOthersWithFlag * 200 <= NumOthers)
+			LogInfo("[DeltaForce] UObject::Flags candidate 0x%X: RF_ClassDefaultObject on %d/%d \"Default__\" objects and %d/%d others",
+				Offset, NumCDOsWithFlag, NumCDOs, NumOthersWithFlag, NumOthers);
+
+			/*
+			* Every CDO has to have the flag and no other object. A wrong offset would make HasAnyFlags(ClassDefaultObject) skip
+			* real classes/structs/enums in the generator, the name based fallback is always correct.
+			*/
+			if (NumCDOs >= 16 && NumCDOsWithFlag == NumCDOs && NumOthersWithFlag == 0)
 				return Offset;
 		}
 
