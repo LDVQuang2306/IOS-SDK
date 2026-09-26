@@ -343,6 +343,36 @@ void PackageManager::InitNames()
 	}
 }
 
+/*
+* Structs that a member stores by value, including the elements of TArray/TSet/TMap. The SDK's containers use sizeof/alignof of their
+* element type, so e.g. 'TMap<uint64, FWeaponDataModifyFunction>' needs the complete struct just like a plain struct member does.
+*/
+template<typename CallbackType>
+static void ForEachStructStoredByValue(UEProperty Property, CallbackType&& Callback, int32 Depth = 0)
+{
+	if (!Property || Depth > 4)
+		return;
+
+	if (Property.IsA(EClassCastFlags::StructProperty))
+	{
+		if (const UEStruct UnderlayingStruct = Property.Cast<UEStructProperty>().GetUnderlayingStruct())
+			Callback(UnderlayingStruct);
+	}
+	else if (Property.IsA(EClassCastFlags::ArrayProperty))
+	{
+		ForEachStructStoredByValue(Property.Cast<UEArrayProperty>().GetInnerProperty(), Callback, Depth + 1);
+	}
+	else if (Property.IsA(EClassCastFlags::SetProperty))
+	{
+		ForEachStructStoredByValue(Property.Cast<UESetProperty>().GetElementProperty(), Callback, Depth + 1);
+	}
+	else if (Property.IsA(EClassCastFlags::MapProperty))
+	{
+		ForEachStructStoredByValue(Property.Cast<UEMapProperty>().GetKeyProperty(), Callback, Depth + 1);
+		ForEachStructStoredByValue(Property.Cast<UEMapProperty>().GetValueProperty(), Callback, Depth + 1);
+	}
+}
+
 void PackageManager::HelperMarkStructDependenciesOfPackage(UEStruct Struct, int32 OwnPackageIdx, int32 RequiredPackageIdx, bool bIsClass)
 {
 	if (UEStruct Super = Struct.GetSuper())
@@ -356,13 +386,11 @@ void PackageManager::HelperMarkStructDependenciesOfPackage(UEStruct Struct, int3
 
 	for (UEProperty Child : Struct.GetProperties())
 	{
-		if (!Child.IsA(EClassCastFlags::StructProperty))
-			continue;
-
-		const UEStruct UnderlayingStruct = Child.Cast<UEStructProperty>().GetUnderlayingStruct();
-
-		if (UnderlayingStruct.GetPackageIndex() == RequiredPackageIdx)
-			StructManager::PackageManagerSetCycleForStruct(UnderlayingStruct.GetIndex(), OwnPackageIdx);
+		ForEachStructStoredByValue(Child, [&](UEStruct UnderlayingStruct)
+		{
+			if (UnderlayingStruct.GetPackageIndex() == RequiredPackageIdx)
+				StructManager::PackageManagerSetCycleForStruct(UnderlayingStruct.GetIndex(), OwnPackageIdx);
+		});
 	}
 }
 
@@ -381,13 +409,11 @@ int32 PackageManager::HelperCountStructDependenciesOfPackage(UEStruct Struct, in
 
 	for (UEProperty Child : Struct.GetProperties())
 	{
-		if (!Child.IsA(EClassCastFlags::StructProperty))
-			continue;
-
-		const int32 UnderlayingStructPackageIdx = Child.Cast<UEStructProperty>().GetUnderlayingStruct().GetPackageIndex();
-
-		if (UnderlayingStructPackageIdx == RequiredPackageIdx)
-			RetCount++;
+		ForEachStructStoredByValue(Child, [&](UEStruct UnderlayingStruct)
+		{
+			if (UnderlayingStruct.GetPackageIndex() == RequiredPackageIdx)
+				RetCount++;
+		});
 	}
 
 	return RetCount;
@@ -395,19 +421,39 @@ int32 PackageManager::HelperCountStructDependenciesOfPackage(UEStruct Struct, in
 
 void PackageManager::HelperAddEnumsFromPacakageToFwdDeclarations(UEStruct Struct, std::vector<std::pair<int32, bool>>& EnumsToForwardDeclare, int32 RequiredPackageIdx, bool bMarkAsClass)
 {
-	for (UEProperty Child : Struct.GetProperties())
+	/* Enums can also be used inside of containers, e.g. 'TMap<EHeroShapeShiftType, ...>' needs the enum declared as well */
+	auto AddEnumsOfProperty = [&](auto&& Self, UEProperty Property, int32 Depth) -> void
 	{
-		const bool bIsEnumPrperty = Child.IsA(EClassCastFlags::EnumProperty);
-		const bool bIsBytePrperty = Child.IsA(EClassCastFlags::ByteProperty);
+		if (!Property || Depth > 4)
+			return;
+
+		if (Property.IsA(EClassCastFlags::ArrayProperty))
+			return Self(Self, Property.Cast<UEArrayProperty>().GetInnerProperty(), Depth + 1);
+
+		if (Property.IsA(EClassCastFlags::SetProperty))
+			return Self(Self, Property.Cast<UESetProperty>().GetElementProperty(), Depth + 1);
+
+		if (Property.IsA(EClassCastFlags::MapProperty))
+		{
+			Self(Self, Property.Cast<UEMapProperty>().GetKeyProperty(), Depth + 1);
+			Self(Self, Property.Cast<UEMapProperty>().GetValueProperty(), Depth + 1);
+			return;
+		}
+
+		const bool bIsEnumPrperty = Property.IsA(EClassCastFlags::EnumProperty);
+		const bool bIsBytePrperty = Property.IsA(EClassCastFlags::ByteProperty);
 
 		if (!bIsEnumPrperty && !bIsBytePrperty)
-			continue;
+			return;
 
-		const UEObject UnderlayingEnum = bIsEnumPrperty ? Child.Cast<UEEnumProperty>().GetEnum() : Child.Cast<UEByteProperty>().GetEnum();
+		const UEObject UnderlayingEnum = bIsEnumPrperty ? Property.Cast<UEEnumProperty>().GetEnum() : Property.Cast<UEByteProperty>().GetEnum();
 
 		if (UnderlayingEnum && UnderlayingEnum.GetPackageIndex() == RequiredPackageIdx)
 			EnumsToForwardDeclare.emplace_back(UnderlayingEnum.GetIndex(), bMarkAsClass);
-	}
+	};
+
+	for (UEProperty Child : Struct.GetProperties())
+		AddEnumsOfProperty(AddEnumsOfProperty, Child, 0);
 }
 
 void PackageManager::HelperInitEnumFwdDeclarationsForPackage(int32 PackageForFwdDeclarations, int32 RequiredPackage, bool bIsClass)
@@ -551,8 +597,12 @@ void PackageManager::HandleCycles()
 		const PackageInfoHandle CurrentPackageInfo = GetInfo(Cycle.CurrentPackage);
 		const PackageInfoHandle PreviousPackageInfo = GetInfo(Cycle.PreviousPacakge);
 
-		/* Add enum forward declarations to the package from which we remove the dependency, as enums are not considered by those dependencies */
-		HelperInitEnumFwdDeclarationsForPackage(Cycle.CurrentPackage, Cycle.PreviousPacakge, Cycle.bAreStructsCyclic);
+		/*
+		* Add enum forward declarations to the package from which we remove the dependency, as enums are not considered by those dependencies.
+		* The last parameter is 'bIsClass': a cycle between structs removes the include from the _structs.hpp file, so the enums have to be
+		* declared there (passing 'bAreStructsCyclic' declared them in the _classes.hpp file instead, e.g. 'EHeroShapeShiftType' in GPGameplay).
+		*/
+		HelperInitEnumFwdDeclarationsForPackage(Cycle.CurrentPackage, Cycle.PreviousPacakge, !Cycle.bAreStructsCyclic);
 
 		if (Cycle.bAreStructsCyclic)
 		{

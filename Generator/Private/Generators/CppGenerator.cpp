@@ -66,8 +66,28 @@ std::string CppGenerator::GenerateBitPadding(uint8 UnderlayingSizeBytes, const u
 	return MakeMemberString(GetTypeFromSize(UnderlayingSizeBytes), fmt::format("BitPad_{:X}_{:X} : {:X}", Offset, PrevBitPropertyEndBit, PadSize), fmt::format("0x{:04X}(0x{:04X})({})", Offset, UnderlayingSizeBytes, std::move(Reason)));
 }
 
+/*
+* Offset at which the data of this type ends for the compiler, i.e. where the members of a derived type start (Itanium C++ ABI "dsize").
+*
+*  - Types whose tail padding is reused by a derived type in the game end at their unaligned size. They get a user-provided constructor
+*    (non-POD), so clang places the members of the derived types inside of the tail padding, just like the game does.
+*  - Every other type is padded up to its full (aligned) size. Otherwise clang could place members of a derived type inside of the
+*    padding of a non-POD base (e.g. behind a memberless type whose super reuses its padding) while the game doesn't.
+*  - Unions keep their unaligned size.
+*/
+int32 CppGenerator::GetDataEnd(const StructWrapper& Struct)
+{
+	if (Struct.HasReusedTrailingPadding() || Struct.IsUnion())
+		return Struct.GetUnalignedSize();
+
+	return Struct.GetSize();
+}
+
 std::string CppGenerator::GenerateMembers(const StructWrapper& Struct, const MemberManager& Members, int32 SuperSize, int32 SuperLastMemberEnd, int32 SuperAlign, int32 PackageIndex)
 {
+	/* See GetDataEnd(), the members (incl. trailing padding) must end exactly there */
+	const int32 DataEnd = GetDataEnd(Struct);
+
 	constexpr uint64 EstimatedCharactersPerLine = 0xF0;
 
 	const bool bIsUnion = Struct.IsUnion();
@@ -194,7 +214,7 @@ std::string CppGenerator::GenerateMembers(const StructWrapper& Struct, const Mem
 		}
 	}
 
-	const int32 MissingByteCount = Struct.GetUnalignedSize() - PrevPropertyEnd;
+	const int32 MissingByteCount = DataEnd - PrevPropertyEnd;
 
 	if (MissingByteCount > 0x0 /* >=Struct.GetAlignment()*/)
 		OutMembers += GenerateBytePadding(PrevPropertyEnd, MissingByteCount, "Fixing Struct Size After Last Property [ Dumper-7 ]");
@@ -694,7 +714,11 @@ void CppGenerator::GenerateStruct(const StructWrapper& Struct, StreamType& Struc
 
 	const bool bHasStaticClass = (bIsClass && Struct.IsUnrealStruct());
 
-	const bool bHasMembers = Members.HasMembers() || (StructSizeWithoutSuper >= Struct.GetAlignment());
+	/* Derived types start where the data of the super ends for the compiler (see GetDataEnd()) */
+	const int32 SuperDataEnd = bHasValidSuper ? GetDataEnd(Super) : 0x0;
+
+	/* A type without own members still needs padding if its data ends after its super's data (otherwise derived types would start too early) */
+	const bool bHasMembers = Members.HasMembers() || (StructSizeWithoutSuper >= Struct.GetAlignment()) || (GetDataEnd(Struct) > SuperDataEnd);
 	const bool bHasFunctions = (Members.HasFunctions() && !Struct.IsFunction()) || bHasStaticClass;
 
 	if (bHasMembers || bHasFunctions)
@@ -702,7 +726,7 @@ void CppGenerator::GenerateStruct(const StructWrapper& Struct, StreamType& Struc
 
 	if (bHasMembers)
 	{
-		StructFile << GenerateMembers(Struct, Members, bIsReusingTrailingPaddingFromSuper ? UnalignedSuperSize : SuperSize, SuperLastMemberEnd, SuperAlignment, PackageIndex);
+		StructFile << GenerateMembers(Struct, Members, SuperDataEnd, SuperLastMemberEnd, SuperAlignment, PackageIndex);
 
 		if (bHasFunctions)
 			StructFile << "\npublic:\n";
@@ -710,6 +734,18 @@ void CppGenerator::GenerateStruct(const StructWrapper& Struct, StreamType& Struc
 
 	if (bHasFunctions)
 		StructFile << GenerateFunctions(Struct, Members, UniqueName, FunctionFile, ParamFile);
+
+	if (bHasReusedTrailingPadding && !Struct.HasCustomTemplateText())
+	{
+		/*
+		* The game (Itanium C++ ABI) places members of a derived type inside this type's tail padding. That only happens for non-POD types,
+		* a user-provided constructor makes this type non-POD so clang uses the same layout (see the 'static_assert's of the derived types).
+		*/
+		const size_t NamespaceEnd = UniqueName.rfind(':');
+		const std::string ConstructorName = NamespaceEnd == std::string::npos ? UniqueName : UniqueName.substr(NamespaceEnd + 1);
+
+		StructFile << fmt::format("\npublic:\n\t/* Non-POD: derived types reuse the tail padding of this type */\n\t{}() {{}}\n", ConstructorName);
+	}
 
 	StructFile << "};\n";
 
@@ -759,10 +795,34 @@ void CppGenerator::GenerateEnum(const EnumWrapper& Enum, StreamType& StructFile)
 	int32 NumValues = 0x0;
 	std::string MemberString;
 
+	const std::string UnderlyingType = GetEnumUnderlayingType(Enum);
+	const bool bIsSigned = UnderlyingType[0] == 'i';
+	const uint8 UnderlyingSize = Enum.GetUnderlyingTypeSize();
+	const int32 NumBits = (UnderlyingSize == 0 || UnderlyingSize > 0x8) ? 0x8 : UnderlyingSize * 0x8; // same fallback (uint8) as GetEnumUnderlayingType()
+
 	for (const EnumCollisionInfo& Info : EnumValueIterator)
 	{
 		NumValues++;
-		MemberString += fmt::format("\t{:{}} = {},\n", Info.GetUniqueName(), 40, Info.GetValue());
+
+		/* UEnum stores every value as int64 */
+		const int64 Value = static_cast<int64>(Info.GetValue());
+
+		const bool bFits = NumBits >= 64 || (bIsSigned ? (Value >= -(1ll << (NumBits - 1)) && Value < (1ll << (NumBits - 1))) : (Value >= 0 && Value < (1ll << NumBits)));
+
+		if (bFits)
+		{
+			MemberString += fmt::format("\t{:{}} = {},\n", Info.GetUniqueName(), 40, bIsSigned ? fmt::format("{}", Value) : fmt::format("{}", static_cast<uint64>(Value)));
+		}
+		else if (Info.GetRawName().ends_with("_MAX"))
+		{
+			/* 'EFoo_MAX = 256' only exists in the reflection data, it doesn't fit into the enum's real (uint8) type */
+			MemberString += fmt::format("\t// {:{}} = {}, (doesn't fit into '{}')\n", Info.GetUniqueName(), 37, Value, UnderlyingType);
+		}
+		else
+		{
+			/* Keep the bit pattern that is stored in memory */
+			MemberString += fmt::format("\t{:{}} = static_cast<{}>(0x{:X}), // {}\n", Info.GetUniqueName(), 40, UnderlyingType, static_cast<uint64>(Value) & ((1ull << NumBits) - 1), Value);
+		}
 	}
 
 	if (!MemberString.empty()) [[likely]]
@@ -778,7 +838,7 @@ enum class {} : {}
 )", Enum.GetFullName()
   , NumValues
   , GetEnumPrefixedName(Enum)
-  , GetEnumUnderlayingType(Enum)
+  , UnderlyingType
   , MemberString);
 }
 
@@ -820,7 +880,49 @@ std::string CppGenerator::GetEnumUnderlayingType(const EnumWrapper& Enum)
 		"uint64"
 	};
 
-	return Enum.GetUnderlyingTypeSize() <= 0x8 ? UnderlayingTypesBySize[static_cast<size_t>(Enum.GetUnderlyingTypeSize()) - 1] : "uint8";
+	static constexpr std::array<const char*, 8> SignedUnderlayingTypesBySize = {
+		"int8",
+		"int16",
+		"InvalidEnumSize",
+		"int32",
+		"InvalidEnumSize",
+		"InvalidEnumSize",
+		"InvalidEnumSize",
+		"int64"
+	};
+
+	const uint8 Size = Enum.GetUnderlyingTypeSize();
+
+	if (Size == 0 || Size > 0x8)
+		return "uint8";
+
+	/*
+	* Enums with negative values (e.g. 'Unknown = -1') are signed in C++. Use the signed type if every (non _MAX) value fits into it,
+	* the unsigned type can't hold them (they used to be emitted as 18446744073709551615 and the SDK didn't compile).
+	*/
+	bool bHasNegativeValue = false;
+	bool bFitsSigned = true;
+
+	const int32 NumBits = Size * 0x8;
+
+	for (const EnumCollisionInfo& Info : Enum.GetMembers())
+	{
+		if (Info.GetRawName().ends_with("_MAX"))
+			continue;
+
+		const int64 Value = static_cast<int64>(Info.GetValue());
+
+		if (Value < 0)
+			bHasNegativeValue = true;
+
+		if (NumBits < 64 && (Value < -(1ll << (NumBits - 1)) || Value >= (1ll << (NumBits - 1))))
+			bFitsSigned = false;
+	}
+
+	if (bHasNegativeValue && bFitsSigned)
+		return SignedUnderlayingTypesBySize[static_cast<size_t>(Size) - 1];
+
+	return UnderlayingTypesBySize[static_cast<size_t>(Size) - 1];
 }
 
 std::string CppGenerator::GetCycleFixupType(const StructWrapper& Struct, bool bIsForInheritance)
@@ -1153,7 +1255,7 @@ void CppGenerator::GeneratePropertyFixupFile(StreamType& PropertyFixup)
 
 	for (const auto& [Name, Property] : UnknownProperties)
 	{
-		PropertyFixup << fmt::format("\nclass alignas(0x{:02X}) {}\n{{\n\tunsigned __int8 Pad[0x{:X}];\n}};\n",Property.GetAlignment(), Name, Property.GetSize());
+		PropertyFixup << fmt::format("\nclass alignas(0x{:02X}) {}\n{{\n\tunsigned char Pad[0x{:X}];\n}};\n", std::max(Property.GetAlignment(), 0x1), Name, Property.GetSize());
 	}
 
 	WriteFileEnd(PropertyFixup, EFileType::PropertyFixup);
@@ -2360,9 +2462,13 @@ R"({
 		},
 		PredefinedFunction{
 			.CustomComment = "Checks whether this object is a classes' default-object",
-			.ReturnType = "bool", .NameWithParams = "IsDefaultObject()", .Body =
+			.ReturnType = "bool", .NameWithParams = "IsDefaultObject()", .Body = Off::UObject::Flags >= 0 ?
 		R"({
 	return (Flags & EObjectFlags::ClassDefaultObject);
+})" :
+		/* UObject::Flags wasn't found (e.g. Delta Force), there is no 'Flags' member. Every class default object is called 'Default__<ClassName>'. */
+		R"({
+	return GetName().starts_with("Default__");
 })",
 			.bIsStatic = false, .bIsConst = true, .bIsBodyInline = false
 		},
@@ -2932,6 +3038,9 @@ void CppGenerator::GenerateBasicFiles(StreamType& BasicHpp, StreamType& BasicCpp
 
 	static auto SortMembers = [](std::vector<PredefinedMember>& Members) -> void
 	{
+		/* Offsets that couldn't be found (-1, e.g. TUObjectArray::MaxElements on Delta Force) must not end up as members at negative offsets */
+		std::erase_if(Members, [](const PredefinedMember& Member) { return !Member.bIsStatic && Member.Offset < 0; });
+
 		std::sort(Members.begin(), Members.end(), ComparePredefinedMembers);
 	};
 
@@ -3322,9 +3431,9 @@ R"({
 		const auto& ObjectsArrayLayout = Off::FUObjectArray::ChunkedFixedLayout;
 		const int32 ObjectArraySize = std::max({
 			ObjectsArrayLayout.ObjectsOffset + 0x8,
-			ObjectsArrayLayout.MaxElementsOffset + 0x8,
+			ObjectsArrayLayout.MaxElementsOffset >= 0 ? ObjectsArrayLayout.MaxElementsOffset + 0x4 : 0x0,
 			ObjectsArrayLayout.NumElementsOffset + 0x4,
-			ObjectsArrayLayout.MaxChunksOffset + 0x4,
+			ObjectsArrayLayout.MaxChunksOffset >= 0 ? ObjectsArrayLayout.MaxChunksOffset + 0x4 : 0x0,
 			ObjectsArrayLayout.NumChunksOffset + 0x4
 		});
 #define max(A, B) (A > B ? A : B)

@@ -94,13 +94,18 @@ namespace
 
 	constexpr uint32_t RF_Public = 0x1, RF_Native = 0x0, RF_ClassDefaultObject = 0x10;
 
+	/* DF_HARNESS_NO_OBJECT_FLAGS=1: UObject::Flags can't be identified (like on the real game), the SDK must not use a 'Flags' member */
+	const bool bScrambleObjectFlags = getenv("DF_HARNESS_NO_OBJECT_FLAGS") != nullptr;
+
+	uint32_t ObjectFlagsValue(uint32_t Flags, size_t Index) { return bScrambleObjectFlags ? static_cast<uint32_t>((Index + 1) * 2654435761u) : Flags; }
+
 	uintptr_t NewObject(size_t Size, uintptr_t Class, uintptr_t Outer, const std::string& Name, uint32_t Flags = RF_Public, uint32_t Number = 0)
 	{
 		const uintptr_t Obj = Alloc(Size);
 		W<uintptr_t>(Obj + 0x00, Vtable);
 		W<uintptr_t>(Obj + 0x08, Class);
 		W<uintptr_t>(Obj + 0x10, Outer);
-		W<uint32_t>(Obj + 0x18, Flags);
+		W<uint32_t>(Obj + 0x18, ObjectFlagsValue(Flags, Objects.size()));
 		W<uint32_t>(Obj + 0x1C, NameId(Name));
 		W<uint32_t>(Obj + 0x20, Number);
 		W<int32_t>(Obj + 0x24, static_cast<int32_t>(Objects.size()));
@@ -226,9 +231,10 @@ void BuildFakeDeltaForce()
 	Chunk0 = Alloc(0x10000 * 0x18, 0x1000);
 	const uintptr_t ChunkTable = Alloc(0x100 * 8);
 	W<uintptr_t>(ChunkTable, Chunk0);
-	W<int32_t>(GObjectsArray + 0x10, 0x210000); // MaxElements
+	/* Like the real game: +0x10 looks like MaxChunks, MaxElements can't be identified (TUObjectArray must not get two members at 0x14) */
+	W<int32_t>(GObjectsArray + 0x10, 0x21);     // MaxChunks
 	W<int32_t>(GObjectsArray + 0x18, 1);        // NumChunks
-	W<int32_t>(GObjectsArray + 0x1C, 0x21);     // MaxChunks
+	W<int32_t>(GObjectsArray + 0x1C, 0x0);      // unknown
 	W<uintptr_t>(GObjectsArray + 0x20, ChunkTable);
 
 	const uintptr_t GWorldPtr = DataAlloc(8, 8);
@@ -435,6 +441,129 @@ void BuildFakeDeltaForce()
 	/* A wide (UTF-16) name */
 	NewClass(Game, "\xE6\xB5\x8B\xE8\xAF\x95", ObjectClass, 0x28);
 
+	/*
+	* Layouts seen in the real Delta Force SDK that didn't compile. The generated SDK has static_asserts for every size/offset,
+	* run.sh compiles it (also for arm64-apple-ios), so a wrong layout fails the harness.
+	*/
+	auto NewEnum = [&](uintptr_t Package, const std::string& Name, const std::vector<std::pair<std::string, int64_t>>& Values) -> uintptr_t
+	{
+		const uintptr_t E = NewObject(0x60, EnumClass, Package, Name);
+		const uintptr_t Data = Alloc(16 * Values.size());
+		for (size_t i = 0; i < Values.size(); i++) { W<uint32_t>(Data + i * 16, NameId(Values[i].first)); W<int64_t>(Data + i * 16 + 8, Values[i].second); }
+		W<uintptr_t>(E + 0x40, Data); W<int32_t>(E + 0x48, static_cast<int32_t>(Values.size())); W<int32_t>(E + 0x4C, static_cast<int32_t>(Values.size()));
+		return E;
+	};
+	auto NewDerivedStruct = [&](uintptr_t Package, const std::string& Name, uintptr_t Super, int32_t Size, int32_t Align) -> uintptr_t
+	{
+		const uintptr_t S = NewStruct(Package, Name, Size, Align);
+		StructInfo(S, Super, Size, Align);
+		return S;
+	};
+	/* FBoolProperty { FieldSize, ByteOffset, ByteMask, FieldMask }: native bool = { 1, 0, 1, 0xFF }, bitfield = { 1, 0, Mask, Mask } */
+	auto AddBool = [&](uintptr_t Owner, const std::string& Name, int32_t Offset, uint8_t Mask) { W<uint32_t>(AddProperty(Owner, "BoolProperty", Name, 1, Offset) + 0x81, Mask == 0xFF ? 0xFF010001u : (0x1u | (uint32_t(Mask) << 16) | (uint32_t(Mask) << 24))); };
+	auto AddObject = [&](uintptr_t Owner, const std::string& Name, int32_t Offset, uintptr_t Class) { W<uintptr_t>(AddProperty(Owner, "ObjectProperty", Name, 8, Offset) + 0x88, Class); };
+
+	/* Enums: 'Unknown = -1' (was printed as 18446744073709551615) and 'EFoo_MAX = 256' in a uint8 enum */
+	const uintptr_t SwitchEnum = NewEnum(Game, "EDFSwitch", { { "EDFSwitch::Unknown", -1 }, { "EDFSwitch::Off", 0 }, { "EDFSwitch::On", 1 }, { "EDFSwitch::EDFSwitch_MAX", 2 } });
+	const uintptr_t LoadingEnum = NewEnum(Game, "EDFLoading", { { "EDFLoading::Inherited", 0 }, { "EDFLoading::RetainOnLoad", 1 }, { "EDFLoading::Uninitialized", 255 }, { "EDFLoading::EDFLoading_MAX", 256 } });
+	{
+		const uintptr_t Holder = NewStruct(Game, "DFEnumHolder", 0x2, 1);
+		W<uintptr_t>(AddProperty(Holder, "ByteProperty", "Switch", 1, 0x0) + 0x88, SwitchEnum);
+		W<uintptr_t>(AddProperty(Holder, "ByteProperty", "Loading", 1, 0x1) + 0x88, LoadingEnum);
+	}
+
+	/* ScriptStruct inheritance reusing the tail padding of the base (FTTTrackBase/FTTPropertyTrack) */
+	{
+		const uintptr_t TrackBase = NewStruct(Game, "DFTrackBase", 0x18, 8);
+		AddProperty(TrackBase, "NameProperty", "TrackName", 8, 0x8);
+		AddBool(TrackBase, "bIsExternalCurve", 0x10, 0xFF);
+		const uintptr_t PropertyTrack = NewDerivedStruct(Game, "DFPropertyTrack", TrackBase, 0x20, 8);
+		AddProperty(PropertyTrack, "NameProperty", "PropertyName", 8, 0x14);
+		const uintptr_t FloatTrack = NewDerivedStruct(Game, "DFFloatTrack", PropertyTrack, 0x28, 8);
+		AddObject(FloatTrack, "CurveFloat", 0x20, ObjectClass);
+	}
+
+	/* A memberless class in between whose derived classes reuse padding (UBaseUIView -> UCommonHUDView -> URaidScreenMarkerView) */
+	{
+		const uintptr_t BaseView = NewClass(Game, "DFBaseView", ObjectClass, 0x38);
+		AddObject(BaseView, "FadeAnim", 0x28, ObjectClass);
+		AddBool(BaseView, "bCacheOn", 0x30, 0xFF);
+		const uintptr_t OtherView = NewClass(Game, "DFOtherView", BaseView, 0x38);
+		AddBool(OtherView, "bOther", 0x31, 0xFF);
+		const uintptr_t HudView = NewClass(Game, "DFHudView", BaseView, 0x38);
+		const uintptr_t RaidView = NewClass(Game, "DFRaidView", HudView, 0x40);
+		AddBool(RaidView, "bNeedShowDistance", 0x32, 0xFF);
+		AddObject(RaidView, "ProgressMID", 0x38, ObjectClass);
+		const uintptr_t CountDownView = NewClass(Game, "DFCountDownView", HudView, 0x38);
+		AddProperty(CountDownView, "IntProperty", "FinalTime", 4, 0x34);
+	}
+
+	/* A memberless class in between that doesn't reuse padding, below a class that does (UParticleModule -> ...SubUVBase -> ...SubUV) */
+	{
+		const uintptr_t Module = NewClass(Game, "DFModule", ObjectClass, 0x30);
+		AddBool(Module, "bSpawnModule", 0x28, 0x01);
+		AddBool(Module, "bEnabled", 0x28, 0x02);
+		AddProperty(Module, "ByteProperty", "LODValidity", 1, 0x2A);
+		const uintptr_t ModuleColor = NewClass(Game, "DFModuleColor", Module, 0x38);
+		AddProperty(ModuleColor, "FloatProperty", "Alpha", 4, 0x2C);
+		const uintptr_t SubBase = NewClass(Game, "DFModuleSubBase", Module, 0x30);
+		const uintptr_t Sub = NewClass(Game, "DFModuleSub", SubBase, 0x40);
+		AddObject(Sub, "Animation", 0x30, ObjectClass);
+		AddBool(Sub, "bUseRealTime", 0x38, 0x01);
+		const uintptr_t SubMovie = NewClass(Game, "DFModuleSubMovie", Sub, 0x40);
+		AddBool(SubMovie, "bUseEmitterTime", 0x39, 0xFF);
+		AddProperty(SubMovie, "IntProperty", "FrameRate", 4, 0x3C);
+	}
+
+	/* Two packages that need each other's structs inside of containers (GPGameplay <-> WeaponDataSystem) */
+	{
+		const uintptr_t PkgA = NewObject(0x40, PackageClass, 0, "/Script/DFPkgA");
+		const uintptr_t PkgB = NewObject(0x40, PackageClass, 0, "/Script/DFPkgB");
+
+		const uintptr_t Inner = NewStruct(PkgA, "DFAInner", 0x8, 4);
+		AddProperty(Inner, "IntProperty", "Value", 4, 0x0);
+		AddProperty(Inner, "IntProperty", "Extra", 4, 0x4);
+
+		const uintptr_t Modify = NewStruct(PkgB, "DFBModify", 0x10, 8);
+		AddProperty(Modify, "IntProperty", "Id", 4, 0x0);
+		AddProperty(Modify, "FloatProperty", "Scale", 4, 0x4);
+		AddObject(Modify, "Source", 0x8, ObjectClass);
+
+		const uintptr_t Context = NewStruct(PkgA, "DFAContext", 0x58, 8);
+		AddProperty(Context, "IntProperty", "RecId", 4, 0x0);
+		{
+			const uintptr_t M = AddProperty(Context, "MapProperty", "RuntimeFunctions", 0x50, 0x8);
+			W<uintptr_t>(M + 0x88, NewProperty(M, false, "IntProperty", "RuntimeFunctions_Key", 4, 0));
+			const uintptr_t Value = NewProperty(M, false, "StructProperty", "RuntimeFunctions_Value", 0x10, 0);
+			W<uintptr_t>(Value + 0x88, Modify);
+			W<uintptr_t>(M + 0x90, Value);
+		}
+
+		const uintptr_t List = NewStruct(PkgB, "DFBList", 0x18, 8);
+		{
+			const uintptr_t A = AddProperty(List, "ArrayProperty", "Items", 0x10, 0x0);
+			const uintptr_t Item = NewProperty(A, false, "StructProperty", "Items", 0x8, 0);
+			W<uintptr_t>(Item + 0x88, Inner);
+			W<uintptr_t>(A + 0x88, Item);
+		}
+		AddProperty(List, "IntProperty", "Count", 4, 0x10);
+
+		/* Enum inside of a map key of the other package (TMap<EHeroShapeShiftType, ...>) */
+		const uintptr_t Shape = NewEnum(PkgA, "EDFShape", { { "EDFShape::Normal", 0 }, { "EDFShape::Big", 1 }, { "EDFShape::EDFShape_MAX", 2 } });
+		const uintptr_t FaceAnim = NewStruct(PkgB, "DFFaceAnim", 0x50, 8);
+		{
+			const uintptr_t M = AddProperty(FaceAnim, "MapProperty", "DefaultFaceAnim", 0x50, 0x0);
+			const uintptr_t Key = NewProperty(M, false, "ByteProperty", "DefaultFaceAnim_Key", 1, 0);
+			W<uintptr_t>(Key + 0x88, Shape);
+			W<uintptr_t>(M + 0x88, Key);
+			W<uintptr_t>(M + 0x90, NewProperty(M, false, "IntProperty", "DefaultFaceAnim_Value", 4, 0));
+		}
+
+		/* Game specific property type the dumper doesn't know (PropertyFixup.hpp) */
+		const uintptr_t Holder = NewClass(PkgB, "DFEncryptedHolder", ObjectClass, 0x30);
+		AddProperty(Holder, "EncryptedObjectProperty", "EncryptedOwner", 8, 0x28);
+	}
+
 	/* CDOs for every class (after all classes exist) + FText defaults on DFCharacter CDOs */
 	const size_t NumBeforeCDOs = Objects.size();
 	for (size_t i = 0; i < NumBeforeCDOs; i++)
@@ -447,7 +576,7 @@ void BuildFakeDeltaForce()
 
 		const int32_t Size = *reinterpret_cast<int32_t*>(Obj + 0x3C);
 		const uintptr_t CDO = NewObject(std::max(Size, 0x28) + 0x40, Obj, *reinterpret_cast<uintptr_t*>(Obj + 0x10), "Default__" + ClassName, RF_Public | RF_ClassDefaultObject);
-		W<uint32_t>(CDO + 0x18, RF_Public | RF_ClassDefaultObject);
+		W<uint32_t>(CDO + 0x18, ObjectFlagsValue(RF_Public | RF_ClassDefaultObject, Objects.size()));
 		W<uintptr_t>(Obj + 0x118, CDO);        // UClass::ClassDefaultObject
 		W<uint64_t>(Obj + 0xE0, 0x0);           // UClass::CastFlags (filled below)
 

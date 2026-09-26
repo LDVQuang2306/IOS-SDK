@@ -44,10 +44,23 @@ $CXX -std=c++20 -w -I"$SDKDIR" -I"$SDKDIR/SDK" -I"$HERE/shim" -I"$ROOT" -o "$BUI
 "$BUILD/sdk_runtime_test"
 
 if [ -n "$IOS_SDK" ]; then
-  echo "[run.sh] compiling the generated SDK for arm64-apple-ios"
+  echo "[run.sh] compiling the generated SDK for arm64-apple-ios (Apple's C++ ABI, the static_asserts check every size/offset)"
   for f in "$SDKDIR"/SDK/*.cpp; do
     clang++ -target arm64-apple-ios14.0 -isysroot "$IOS_SDK" -std=c++20 -fsyntax-only -w -I"$SDKDIR" -I"$SDKDIR/SDK" "$f"
   done
 fi
+
+echo "[run.sh] UObject::Flags can't be identified (like on the real game): the SDK must still compile"
+rm -rf "$BUILD/home_noflags" && mkdir -p "$BUILD/home_noflags/Documents"
+HOME="$BUILD/home_noflags" ASAN_OPTIONS=detect_leaks=0 DF_HARNESS_NO_OBJECT_FLAGS=1 "$BUILD/harness" > "$BUILD/harness_noflags.log" 2>&1
+grep "UObject::Flags" "$BUILD/harness_noflags.log"
+NOFLAGS_SDK="$BUILD/home_noflags/Documents/1.0.0_Test-DeltaForce/CppSDK"
+grep -q 'return GetName().starts_with("Default__");' "$NOFLAGS_SDK/SDK/CoreUObject_functions.cpp"
+for f in Basic.cpp CoreUObject_functions.cpp; do
+  $CXX -std=c++20 -fsyntax-only -w -I"$NOFLAGS_SDK" -I"$NOFLAGS_SDK/SDK" -I"$HERE/shim" "$NOFLAGS_SDK/SDK/$f"
+  if [ -n "$IOS_SDK" ]; then
+    clang++ -target arm64-apple-ios14.0 -isysroot "$IOS_SDK" -std=c++20 -fsyntax-only -w -I"$NOFLAGS_SDK" -I"$NOFLAGS_SDK/SDK" "$NOFLAGS_SDK/SDK/$f"
+  fi
+done
 
 echo "[run.sh] OK"
