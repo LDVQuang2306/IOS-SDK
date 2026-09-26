@@ -1,5 +1,5 @@
-#include "Wrappers/EnumWrapper.h"
-#include "Managers/EnumManager.h"
+#include "../../Public/Wrappers/EnumWrapper.h"
+#include "../../Public/Managers/EnumManager.h"
 
 EnumWrapper::EnumWrapper(const UEEnum Enm)
     : Enum(Enm), InfoHandle(EnumManager::GetInfo(Enm))

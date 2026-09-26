@@ -3,8 +3,8 @@
 #include <iostream>
 #include <string>
 
-#include "Unreal/ObjectArray.h"
-#include "PredefinedMembers.h"
+#include "../../../Engine/Public/Unreal/ObjectArray.h"
+#include "../PredefinedMembers.h"
 
 
 class IDAMappingGenerator

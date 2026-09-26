@@ -4,11 +4,11 @@
 #include <string>
 #include <iostream>
 
-#include "Unreal/Enums.h"
-#include "OffsetFinder/Offsets.h"
+#include "Enums.h"
+#include "../OffsetFinder/Offsets.h"
 
 
-#include "Utils.h"
+#include "../../../Utils/Utils.h"
 #include "UnrealContainers.h"
 
 using namespace UC;

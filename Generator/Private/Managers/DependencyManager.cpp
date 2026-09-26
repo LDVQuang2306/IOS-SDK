@@ -1,4 +1,5 @@
-#include "Managers/DependencyManager.h"
+#include "../../Public/Managers/DependencyManager.h"
+
 
 DependencyManager::DependencyManager(int32 ObjectToTrack)
 {

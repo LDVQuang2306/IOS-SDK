@@ -1,6 +1,6 @@
 #pragma once
 
-#include "Managers/EnumManager.h"
+#include "../Managers/EnumManager.h"
 
 
 class EnumWrapper

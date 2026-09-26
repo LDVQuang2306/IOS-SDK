@@ -3,8 +3,8 @@
 #include <vector>
 #include <unordered_map>
 
-#include "Unreal/Enums.h"
-#include "Unreal/UnrealObjects.h"
+#include "../../Engine/Public/Unreal/Enums.h"
+#include "../../Engine/Public/Unreal/UnrealObjects.h"
 
 struct PredefinedMember
 {
@@ -76,7 +76,7 @@ inline bool CompareUnrealProperties(UEProperty Left, UEProperty Right)
     {
         if (Left.GetOffset() == Right.GetOffset())
         {
-            return Left.Cast<UEBoolProperty>().GetBitIndex() < Right.Cast<UEBoolProperty>().GetBitIndex();
+            return Left.Cast<UEBoolProperty>().GetFieldMask() < Right.Cast<UEBoolProperty>().GetFieldMask();
         }
     }
 

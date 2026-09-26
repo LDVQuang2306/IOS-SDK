@@ -1,4 +1,5 @@
-#include "Generators/DumpspaceGenerator.h"
+
+#include "../../Public/Generators/DumpspaceGenerator.h"
 
 std::string DumpspaceGenerator::GetStructPrefixedName(const StructWrapper& Struct)
 {
@@ -236,13 +237,6 @@ std::string DumpspaceGenerator::GetMemberTypeStr(UEProperty Property, std::strin
 		
 		return "UObject";
 	}
-	else if (Settings::EngineCore::bEnableEncryptedObjectPropertySupport && Flags & EClassCastFlags::ObjectPropertyBase && Member.GetSize() == 0x10)
-	{
-		if (UEClass PropertyClass = Member.Cast<UEObjectProperty>().GetPropertyClass())
-			return fmt::format("TEncryptedObjPtr<class {}>", GetStructPrefixedName(PropertyClass));
-
-		return "TEncryptedObjPtr<class UObject>";
-	}
 	else if (Flags & EClassCastFlags::MapProperty)
 	{
 		UEMapProperty MemberAsMapProperty = Member.Cast<UEMapProperty>();
@@ -280,18 +274,7 @@ std::string DumpspaceGenerator::GetMemberTypeStr(UEProperty Property, std::strin
 	}
 	else if (Flags & EClassCastFlags::FieldPathProperty)
 	{
-
-		if (Settings::Internal::bIsObjPtrInsteadOfFieldPathProperty)
-		{
-			OutExtendedType = "*";
-
-			if (UEClass PropertyClass = Member.Cast<UEObjectProperty>().GetPropertyClass())
-				return GetStructPrefixedName(PropertyClass);
-
-			return "UObject";
-		}
-
-		if (UEFFieldClass PropertyClass = Member.Cast<UEFieldPathProperty>().GetFieldClass())
+		if (UEFFieldClass PropertyClass = Member.Cast<UEFieldPathProperty>().GetFielClass())
 		{
 			OutSubtypes.push_back(ManualCreateMemberType(DSGen::ET_Struct, PropertyClass.GetCppName()));
 		}
@@ -463,8 +446,6 @@ DSGen::FunctionHolder DumpspaceGenerator::GenearateFunction(const FunctionWrappe
 
 void DumpspaceGenerator::GeneratedStaticOffsets()
 {
-	DSGen::addOffset("Dumper", 7);
-
 	DSGen::addOffset("OFFSET_GOBJECTS", Off::InSDK::ObjArray::GObjects);
 	DSGen::addOffset(Off::InSDK::Name::bIsUsingAppendStringOverToString ? "OFFSET_APPENDSTRING" : "OFFSET_TOSTRING", Off::InSDK::Name::AppendNameToString);
 	DSGen::addOffset("OFFSET_GNAMES", Off::InSDK::NameArray::GNames);

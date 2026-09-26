@@ -1,12 +1,12 @@
 #pragma once
 
-#include "Unreal/ObjectArray.h"
+#include "../../../Engine/Public/Unreal/ObjectArray.h"
 
-#include "Managers/CollisionManager.h"
-#include "Managers/StructManager.h"
-#include "Managers/MemberManager.h"
+#include "../Managers/CollisionManager.h"
+#include "../Managers/StructManager.h"
+#include "../Managers/MemberManager.h"
 
-#include "PredefinedMembers.h"
+#include "../PredefinedMembers.h"
 
 
 class StructWrapper

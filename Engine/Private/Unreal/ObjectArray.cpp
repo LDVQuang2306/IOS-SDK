@@ -1,14 +1,15 @@
 
 #include <iostream>
 #include <fstream>
-#include <format.h> // fmt: std::format is unavailable for the iOS 14 deployment target
+#include <format>
 #include <filesystem>
 #include <unistd.h>
+#include <format.h>
 
-#include "Unreal/ObjectArray.h"
-#include "OffsetFinder/Offsets.h"
-#include "Utils.h"
-#include "Menu/Logger.h"
+#include "../../Public/Unreal/ObjectArray.h"
+#include "../../Public/OffsetFinder/Offsets.h"
+#include "../../../Utils/Utils.h"
+#include "../../../Menu/Logger.h"
 
 
 namespace fs = std::filesystem;
@@ -45,14 +46,6 @@ constexpr inline std::array FChunkedFixedUObjectArrayLayouts =
 	{
 		.ObjectsOffset = 0x20,
 		.MaxElementsOffset = 0x10,
-		.NumElementsOffset = 0x4,
-		.MaxChunksOffset = 0x0,
-		.NumChunksOffset = 0x14,
-	},
-	FChunkedFixedUObjectArrayLayout // DeltaForce (current season, GUObjectArray::ObjObjects @0x10). Normally the Delta Force profile is used instead.
-	{
-		.ObjectsOffset = 0x20,
-		.MaxElementsOffset = 0x10,
 		.NumElementsOffset = 0x14,
 		.MaxChunksOffset = 0x1C,
 		.NumChunksOffset = 0x18,
@@ -64,7 +57,7 @@ constexpr inline std::array FChunkedFixedUObjectArrayLayouts =
 		.NumElementsOffset = 0x00, // first
 		.MaxChunksOffset = 0x14,
 		.NumChunksOffset = 0x20,
-	},
+	}
 };
 
 bool IsAddressValidGObjects(const uintptr Address, const FFixedUObjectArrayLayout& Layout)
@@ -268,7 +261,7 @@ void ObjectArray::Init(bool bScanAllMemory, const char* const ModuleName)
 {
     LogInfo("\nDumper-7 by me, you & him\n\n\n");
 
-    const auto [ImageBase, ImageSize, Header, Slide] = GetImageBaseAndSize(ModuleName);
+    const auto [ImageBase, ImageSize, Header] = GetImageBaseAndSize(ModuleName);
 
     if (!ImageBase)
     {
@@ -467,9 +460,6 @@ void ObjectArray::DumpObjects(const fs::path& Path, bool bWithPathname)
 
 	for (auto Object : ObjectArray())
 	{
-        if (!Object.GetAddress())
-            continue;
-        
 		if (!bWithPathname)
 		{
 			DumpStream << fmt::format("[{:08X}] {{{}}} {}\n", Object.GetIndex(), Object.GetAddress(), Object.GetFullName());
@@ -496,8 +486,6 @@ void ObjectArray::DumpObjectsWithProperties(const fs::path& Path, bool bWithPath
 
 	for (auto Object : ObjectArray())
 	{
-        if (!Object.GetAddress())
-            continue;
 		if (!bWithPathname)
 		{
 			DumpStream << fmt::format("[{:08X}] {{{}}} {}\n", Object.GetIndex(), Object.GetAddress(), Object.GetFullName());
@@ -543,9 +531,6 @@ UEType ObjectArray::FindObject(const std::string& FullName, EClassCastFlags Requ
 {
 	for (UEObject Object : ObjectArray())
 	{
-        if (!Object.GetAddress())
-            continue;
-        
 		if (Object.IsA(RequiredType) && Object.GetFullName() == FullName)
 		{
 			return Object.Cast<UEType>();
@@ -560,29 +545,14 @@ UEType ObjectArray::FindObjectFast(const std::string& Name, EClassCastFlags Requ
 {
 	auto ObjArray = ObjectArray();
 
-	const int32 Total = ObjectArray::Num();
-	int32 i = 0;
-
 	for (UEObject Object : ObjArray)
 	{
-		// Progress heartbeat so a slow / stuck scan is visible in the console
-		if ((i & 0xFFFF) == 0 && i > 0)
-			LogInfo("FindObjectFast(\"%s\"): scanned %d / %d", Name.c_str(), i, Total);
-		i++;
-
-		// Skip objects whose UObject* pointer or class read would fault
-		const void* Addr = Object.GetAddress();
-		if (!Addr || IsBadReadPtr(Addr))
-			continue;
-
 		if (Object.IsA(RequiredType) && Object.GetName() == Name)
 		{
-			LogSuccess("FindObjectFast(\"%s\"): found at index %d", Name.c_str(), i - 1);
 			return Object.Cast<UEType>();
 		}
 	}
 
-	LogError("FindObjectFast(\"%s\"): not found after scanning %d objects", Name.c_str(), Total);
 	return UEType();
 }
 
@@ -657,7 +627,7 @@ ObjectArray::ObjectsIterator& ObjectArray::ObjectsIterator::operator++()
 	return *this;
 }
 
-bool ObjectArray::ObjectsIterator::operator!=(const ObjectsIterator& Other) const
+bool ObjectArray::ObjectsIterator::operator!=(const ObjectsIterator& Other)
 {
 	return CurrentIndex != Other.CurrentIndex;
 }
@@ -668,119 +638,33 @@ int32 ObjectArray::ObjectsIterator::GetIndex() const
 }
 
 /*
-* The compiler won't generate functions for a specific template type unless it's used in the .cpp file corresponding to the
-* header it was declatred in.
-*
+
 * See https://stackoverflow.com/questions/456713/why-do-i-get-unresolved-external-symbol-errors-when-using-templates
 */
-[[maybe_unused]] void TemplateTypeCreationForObjectArray(void)
-{
-	ObjectArray::FindObject<UEObject>("");
-	ObjectArray::FindObject<UEField>("");
-	ObjectArray::FindObject<UEEnum>("");
-	ObjectArray::FindObject<UEStruct>("");
-	ObjectArray::FindObject<UEClass>("");
-	ObjectArray::FindObject<UEFunction>("");
-	ObjectArray::FindObject<UEProperty>("");
-	ObjectArray::FindObject<UEByteProperty>("");
-	ObjectArray::FindObject<UEBoolProperty>("");
-	ObjectArray::FindObject<UEObjectProperty>("");
-	ObjectArray::FindObject<UEClassProperty>("");
-	ObjectArray::FindObject<UEStructProperty>("");
-	ObjectArray::FindObject<UEArrayProperty>("");
-	ObjectArray::FindObject<UEMapProperty>("");
-	ObjectArray::FindObject<UESetProperty>("");
-	ObjectArray::FindObject<UEEnumProperty>("");
+// Explicit Template Instantiation
+// Bắt buộc trình biên dịch tạo ra code cho các hàm này để Linker có thể tìm thấy.
 
-	ObjectArray::FindObjectFast<UEObject>("");
-	ObjectArray::FindObjectFast<UEField>("");
-	ObjectArray::FindObjectFast<UEEnum>("");
-	ObjectArray::FindObjectFast<UEStruct>("");
-	ObjectArray::FindObjectFast<UEClass>("");
-	ObjectArray::FindObjectFast<UEFunction>("");
-	ObjectArray::FindObjectFast<UEProperty>("");
-	ObjectArray::FindObjectFast<UEByteProperty>("");
-	ObjectArray::FindObjectFast<UEBoolProperty>("");
-	ObjectArray::FindObjectFast<UEObjectProperty>("");
-	ObjectArray::FindObjectFast<UEClassProperty>("");
-	ObjectArray::FindObjectFast<UEStructProperty>("");
-	ObjectArray::FindObjectFast<UEArrayProperty>("");
-	ObjectArray::FindObjectFast<UEMapProperty>("");
-	ObjectArray::FindObjectFast<UESetProperty>("");
-	ObjectArray::FindObjectFast<UEEnumProperty>("");
+#define INSTANTIATE_OBJ_ARRAY_TEMPLATES(Type) \
+    template Type ObjectArray::GetByIndex<Type>(int32); \
+    template Type ObjectArray::FindObject<Type>(const std::string&, EClassCastFlags); \
+    template Type ObjectArray::FindObjectFast<Type>(const std::string&, EClassCastFlags); \
+    template Type ObjectArray::FindObjectFastInOuter<Type>(const std::string&, std::string);
 
-	ObjectArray::FindObjectFastInOuter<UEObject>("", "");
-	ObjectArray::FindObjectFastInOuter<UEField>("", "");
-	ObjectArray::FindObjectFastInOuter<UEEnum>("", "");
-	ObjectArray::FindObjectFastInOuter<UEStruct>("", "");
-	ObjectArray::FindObjectFastInOuter<UEClass>("", "");
-	ObjectArray::FindObjectFastInOuter<UEFunction>("", "");
-	ObjectArray::FindObjectFastInOuter<UEProperty>("", "");
-	ObjectArray::FindObjectFastInOuter<UEByteProperty>("", "");
-	ObjectArray::FindObjectFastInOuter<UEBoolProperty>("", "");
-	ObjectArray::FindObjectFastInOuter<UEObjectProperty>("", "");
-	ObjectArray::FindObjectFastInOuter<UEClassProperty>("", "");
-	ObjectArray::FindObjectFastInOuter<UEStructProperty>("", "");
-	ObjectArray::FindObjectFastInOuter<UEArrayProperty>("", "");
-	ObjectArray::FindObjectFastInOuter<UEMapProperty>("", "");
-	ObjectArray::FindObjectFastInOuter<UESetProperty>("", "");
-	ObjectArray::FindObjectFastInOuter<UEEnumProperty>("", "");
+INSTANTIATE_OBJ_ARRAY_TEMPLATES(UEObject)
+INSTANTIATE_OBJ_ARRAY_TEMPLATES(UEField)
+INSTANTIATE_OBJ_ARRAY_TEMPLATES(UEEnum)
+INSTANTIATE_OBJ_ARRAY_TEMPLATES(UEStruct)
+INSTANTIATE_OBJ_ARRAY_TEMPLATES(UEClass)
+INSTANTIATE_OBJ_ARRAY_TEMPLATES(UEFunction)
+INSTANTIATE_OBJ_ARRAY_TEMPLATES(UEProperty)
+INSTANTIATE_OBJ_ARRAY_TEMPLATES(UEByteProperty)
+INSTANTIATE_OBJ_ARRAY_TEMPLATES(UEBoolProperty)
+INSTANTIATE_OBJ_ARRAY_TEMPLATES(UEObjectProperty)
+INSTANTIATE_OBJ_ARRAY_TEMPLATES(UEClassProperty)
+INSTANTIATE_OBJ_ARRAY_TEMPLATES(UEStructProperty)
+INSTANTIATE_OBJ_ARRAY_TEMPLATES(UEArrayProperty)
+INSTANTIATE_OBJ_ARRAY_TEMPLATES(UEMapProperty)
+INSTANTIATE_OBJ_ARRAY_TEMPLATES(UESetProperty)
+INSTANTIATE_OBJ_ARRAY_TEMPLATES(UEEnumProperty)
 
-	ObjectArray::GetByIndex<UEObject>(-1);
-	ObjectArray::GetByIndex<UEField>(-1);
-	ObjectArray::GetByIndex<UEEnum>(-1);
-	ObjectArray::GetByIndex<UEStruct>(-1);
-	ObjectArray::GetByIndex<UEClass>(-1);
-	ObjectArray::GetByIndex<UEFunction>(-1);
-	ObjectArray::GetByIndex<UEProperty>(-1);
-	ObjectArray::GetByIndex<UEByteProperty>(-1);
-	ObjectArray::GetByIndex<UEBoolProperty>(-1);
-	ObjectArray::GetByIndex<UEObjectProperty>(-1);
-	ObjectArray::GetByIndex<UEClassProperty>(-1);
-	ObjectArray::GetByIndex<UEStructProperty>(-1);
-	ObjectArray::GetByIndex<UEArrayProperty>(-1);
-	ObjectArray::GetByIndex<UEMapProperty>(-1);
-	ObjectArray::GetByIndex<UESetProperty>(-1);
-	ObjectArray::GetByIndex<UEEnumProperty>(-1);
-}
-
-
-bool AllFieldIterator::operator!=(const AllFieldIterator& Other) const
-{
-    return CurrentObject != Other.CurrentObject || PropertyIndex != Other.PropertyIndex;
-}
-
-AllFieldIterator& AllFieldIterator::operator++()
-{
-    if (CurrenStructHasMoreMembers())
-    {
-        PropertyIndex++;
-        return *this;
-    }
-    IterateToNextStructWithMembers();
-    return *this;
-}
-
-UEProperty AllFieldIterator::operator*() const
-{
-    return Fields[PropertyIndex];
-}
-
-void AllFieldIterator::IterateToNextStruct()
-{
-    if (IsEndIterator()) return;
-    ++CurrentObject;
-    while (CurrentObject != ObjectEndIterator && !IsCurrentObjectStruct())
-        ++CurrentObject;
-}
-
-void AllFieldIterator::IterateToNextStructWithMembers()
-{
-    while (!CurrenStructHasMoreMembers())
-    {
-        IterateToNextStruct();
-        PropertyIndex = 0;
-        if (IsEndIterator()) return;
-        Fields = GetCurrentStruct().GetProperties();
-    }
-}
+#undef INSTANTIATE_OBJ_ARRAY_TEMPLATES

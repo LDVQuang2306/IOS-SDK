@@ -17,7 +17,6 @@
 #include <mach-o/getsect.h>
 #include <dlfcn.h>
 #include "Settings.h"
-#include "TmpUtils.h"
 
 inline std::string str_tolower(std::string S)
 {
@@ -25,9 +24,39 @@ inline std::string str_tolower(std::string S)
     return S;
 }
 
-// StrlenHelper / StrnCmpHelper: provided by TmpUtils.h (upstream-shared). iOS adds char16_t specialization below.
-template<> inline int32_t StrlenHelper<char16_t>(const char16_t* Str) { return std::char_traits<char16_t>::length(Str); }
-template<> inline bool StrnCmpHelper<char16_t>(const char16_t* Left, const char16_t* Right, size_t N) { return std::char_traits<char16_t>::compare(Left, Right, N) == 0; }
+template<typename CharType>
+inline int32_t StrlenHelper(const CharType* Str)
+{
+    if constexpr (std::is_same<CharType, char>())
+    {
+        return strlen(Str);
+    }
+    else if constexpr (std::is_same<CharType, char16_t>())
+    {
+        return std::char_traits<char16_t>::length(Str);
+    }
+    else
+    {
+        return wcslen(Str);
+    }
+}
+
+template<typename CharType>
+inline bool StrnCmpHelper(const CharType* Left, const CharType* Right, size_t NumCharsToCompare)
+{
+    if constexpr (std::is_same<CharType, char>())
+    {
+        return strncmp(Left, Right, NumCharsToCompare) == 0;
+    }
+    else if constexpr (std::is_same<CharType, char16_t>())
+    {
+        return std::char_traits<char16_t>::compare(Left, Right, NumCharsToCompare) == 0;
+    }
+    else
+    {
+        return wcsncmp(Left, Right, NumCharsToCompare) == 0;
+    }
+}
 
 namespace ASMUtils
 {
@@ -171,7 +200,6 @@ struct MachImageInfo {
     uintptr_t Base;
     size_t Size;
     const struct mach_header_64* Header;
-    intptr_t Slide;
 };
 
 /* A loaded segment of a Mach-O image, already relocated by the ASLR slide. [Begin, End) */
@@ -274,20 +302,19 @@ inline MachImageInfo GetImageBaseAndSize(const char* ImageName = nullptr)
     const int32_t Index = FindImageIndex(ImageName);
 
     if (Index < 0)
-        return { 0, 0, nullptr, 0 };
+        return { 0, 0, nullptr };
 
     const auto* Header = reinterpret_cast<const struct mach_header_64*>(_dyld_get_image_header(Index));
-    const intptr_t Slide = _dyld_get_image_vmaddr_slide(Index);
     const uintptr_t Base = reinterpret_cast<uintptr_t>(Header);
 
     uintptr_t MaxAddr = Base;
-    for (const MachSegment& Segment : GetImageSegments(Header, Slide))
+    for (const MachSegment& Segment : GetImageSegments(Header, _dyld_get_image_vmaddr_slide(Index)))
     {
         if (Segment.End > MaxAddr)
             MaxAddr = Segment.End;
     }
 
-    return { Base, static_cast<size_t>(MaxAddr - Base), Header, Slide };
+    return { Base, static_cast<size_t>(MaxAddr - Base), Header };
 }
 
 inline uintptr_t GetModuleBase(const char* SearchModuleName = nullptr)
@@ -578,7 +605,7 @@ inline void* FindPatternInRange(const char* Signature, const uint8_t* Start, uin
 
 inline void* FindPattern(const char* Signature, const char* SegmentName = "__TEXT", uint32_t Offset = 0, uintptr_t StartAddress = 0x0)
 {
-    const auto [ImageBase, ImageSize, Header, Slide] = GetImageBaseAndSize();
+    const auto [ImageBase, ImageSize, Header] = GetImageBaseAndSize();
     
     // Default to ImageBase (Scan All)
     uintptr_t SearchStart = ImageBase;
@@ -827,7 +854,7 @@ public:
 template<typename Type = const char*>
 inline MemAddress FindByString(Type RefStr)
 {
-    const auto [ImageBase, ImageSize, Header, Slide] = GetImageBaseAndSize();
+    const auto [ImageBase, ImageSize, Header] = GetImageBaseAndSize();
     const auto [TextSection, TextSize] = GetSegmentByName(Header, "__TEXT");
     
     if (!TextSection) return nullptr;
@@ -867,7 +894,7 @@ inline MemAddress FindByStringInAllSections(const CharType* RefStr, uintptr_t St
 {
     static_assert(std::is_same_v<CharType, char> || std::is_same_v<CharType, wchar_t> || std::is_same_v<CharType, char16_t>, "Only char/wchar_t/char16_t supported");
 
-    const auto [ImageBase, ImageSize, Header, Slide] = GetImageBaseAndSize();
+    const auto [ImageBase, ImageSize, Header] = GetImageBaseAndSize();
     const uintptr_t ImageEnd = ImageBase + ImageSize;
 
     if (StartAddress != 0x0 && (StartAddress < ImageBase || StartAddress > ImageEnd))
@@ -926,7 +953,7 @@ inline MemAddress FindUnrealExecFunctionByString(Type RefStr, void* StartAddress
 {
     using CharType = std::remove_const_t<std::remove_pointer_t<Type>>;
 
-    const auto [ImageBase, ImageSize, Header, Slide] = GetImageBaseAndSize();
+    const auto [ImageBase, ImageSize, Header] = GetImageBaseAndSize();
     const uintptr_t ImageEnd = ImageBase + ImageSize;
 
     const size_t RefStrLen = static_cast<size_t>(StrlenHelper(RefStr));
@@ -985,4 +1012,16 @@ template<bool bCheckIfLeaIsStrPtr = false>
 inline MemAddress FindByWStringInAllSections(const TCHAR* RefStr)
 {
     return FindByStringInAllSections<bCheckIfLeaIsStrPtr, TCHAR>(RefStr);
+}
+
+namespace FileNameHelper
+{
+    inline void MakeValidFileName(std::string& InOutName)
+    {
+        for (char& c : InOutName)
+        {
+            if (c == '<' || c == '>' || c == ':' || c == '\"' || c == '/' || c == '\\' || c == '|' || c == '?' || c == '*')
+                c = '_';
+        }
+    }
 }

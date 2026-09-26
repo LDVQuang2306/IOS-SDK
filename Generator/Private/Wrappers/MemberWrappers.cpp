@@ -1,6 +1,4 @@
-#include "Wrappers/MemberWrappers.h"
-
-#include "Platform.h"
+#include "../../Public/Wrappers/MemberWrappers.h"
 
 
 PropertyWrapper::PropertyWrapper(const std::shared_ptr<StructWrapper>& Str, const PredefinedMember* Predef)
@@ -288,7 +286,7 @@ uintptr_t FunctionWrapper::GetExecFuncOffset() const
     if (!bIsUnrealFunction)
         return 0x0;
 
-    return Platform::GetOffset(Function.GetExecFunction());
+    return GetOffset(Function.GetExecFunction());
 }
 
 UEFunction FunctionWrapper::GetUnrealFunction() const

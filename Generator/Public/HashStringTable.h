@@ -2,10 +2,11 @@
 
 #include <cassert>
 #include <cstring>
-#include <format.h> // fmt: std::format is unavailable for the iOS 14 deployment target
+#include <format>
 #include <iostream>
 
-#include "Unreal/Enums.h"
+#include "../../Engine/Public/Unreal/Enums.h"
+#include "Settings.h"
 
 
 #define WINDOWS_IGNORE_PACKING_MISMATCH
@@ -89,7 +90,7 @@ private:
     {
         // NOT null-terminated
         char Char[MaxStringLength];
-        wchar_t WChar[MaxStringLength];
+        TCHAR WChar[MaxStringLength];
     };
 
 private:
@@ -107,9 +108,9 @@ public:
     AccessLimitedCollisionCount GetCollisionCount() const { return { OptionalCollisionCount }; }
 
     inline std::string GetName() const { return std::string(Char, GetStringLength()); }
-    inline std::wstring GetWideName() const { return std::wstring(WChar, GetStringLength()); }
+    inline UnrealString GetWideName() const { return UnrealString(WChar, GetStringLength()); }
     inline std::string_view GetNameView() const { return std::string_view(Char, GetStringLength()); }
-    inline std::wstring_view GetWideNameView() const { return std::wstring_view(WChar, GetStringLength()); }
+    inline std::basic_string_view<TCHAR> GetWideNameView() const { return std::basic_string_view<TCHAR>(WChar, GetStringLength()); }
 };
 #pragma pack(pop)
 

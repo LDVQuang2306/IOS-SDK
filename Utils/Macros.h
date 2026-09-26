@@ -1,8 +1,7 @@
 #pragma once
 
-#import <UIKit/UIKit.h>
-#import <MetalKit/MetalKit.h>
 #import <Foundation/Foundation.h>
+#import <UIKit/UIKit.h>
 
 #ifndef _CRT_SECURE_NO_WARNINGS
 #define _CRT_SECURE_NO_WARNINGS

@@ -2,9 +2,9 @@
 
 #include <fstream>
 
-#include "Unreal/ObjectArray.h"
-#include "Wrappers/MemberWrappers.h"
-#include "Wrappers/EnumWrapper.h"
+#include "../../../Engine/Public/Unreal/ObjectArray.h"
+#include "../Wrappers/MemberWrappers.h"
+#include "../Wrappers/EnumWrapper.h"
 
 
 /*
@@ -79,9 +79,6 @@ private:
 
         /* Adds support for enums with more than 255 values */
         LargeEnums,
-
-        /* Adds support for explicit enum values */
-        ExplicitEnumValues,
 
         Latest,
         LatestPlusOne,

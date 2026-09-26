@@ -10,13 +10,13 @@
 
 #include <format.h>
 
-#include "Unreal/DeltaForce.h"
-#include "Unreal/ObjectArray.h"
-#include "Unreal/NameArray.h"
-#include "OffsetFinder/Offsets.h"
-#include "OffsetFinder/OffsetFinder.h"
-#include "Utils.h"
-#include "Menu/Logger.h"
+#include "../../Public/Unreal/DeltaForce.h"
+#include "../../Public/Unreal/ObjectArray.h"
+#include "../../Public/Unreal/NameArray.h"
+#include "../../Public/OffsetFinder/Offsets.h"
+#include "../../Public/OffsetFinder/OffsetFinder.h"
+#include "../../../Utils/Utils.h"
+#include "../../../Menu/Logger.h"
 
 #include "DeltaForceDiscovery.h"
 
@@ -149,7 +149,7 @@ namespace
 		Off::UStruct::Children = P.StructChildren;
 		Off::UStruct::ChildProperties = P.StructProperties;
 		Off::UStruct::Size = P.StructSize;
-		Off::UStruct::MinAlignment = P.StructAlignment;
+		Off::UStruct::MinAlignemnt = P.StructAlignment;
 
 		Off::UFunction::FunctionFlags = P.FunctionFlags;
 		Off::UFunction::ExecFunction = P.FunctionNative;
@@ -284,11 +284,11 @@ namespace
 
 		/* UStruct::Size / MinAlignment */
 		const int32 GuidSize = SafeRead<int32>(Core.Guid + Off::UStruct::Size, -1);
-		const int32 GuidAlignment = SafeRead<int32>(Core.Guid + Off::UStruct::MinAlignment, -1);
+		const int32 GuidAlignment = SafeRead<int32>(Core.Guid + Off::UStruct::MinAlignemnt, -1);
 
 		if (GuidSize != 0x10 || GuidAlignment != 0x4)
 		{
-			Error = fmt::format("UStruct::Size (0x{:X}) / MinAlignment (0x{:X}) wrong: FGuid size={} alignment={}", Off::UStruct::Size, Off::UStruct::MinAlignment, GuidSize, GuidAlignment);
+			Error = fmt::format("UStruct::Size (0x{:X}) / MinAlignment (0x{:X}) wrong: FGuid size={} alignment={}", Off::UStruct::Size, Off::UStruct::MinAlignemnt, GuidSize, GuidAlignment);
 			return false;
 		}
 

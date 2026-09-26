@@ -4203,12 +4203,6 @@ int ZSTD_pthread_cond_destroy(ZSTD_pthread_cond_t* cond)
 #ifndef ZSTD_COMMON_CPU_H
 #define ZSTD_COMMON_CPU_H
 
-/**
- * Implementation taken from folly/CpuId.h
- * https://github.com/facebook/folly/blob/master/folly/CpuId.h
- */
-
-/**** skipping file: mem.h ****/
 
 #ifdef _MSC_VER
 #include <intrin.h>

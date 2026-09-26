@@ -6,20 +6,20 @@
 #include <cstdio>
 #include <pthread.h>
 
-#include "Generators/CppGenerator.h"
-#include "Generators/MappingGenerator.h"
-#include "Generators/IDAMappingGenerator.h"
-#include "Generators/DumpspaceGenerator.h"
+#include "Generator/Public/Generators/CppGenerator.h"
+#include "Generator/Public/Generators/MappingGenerator.h"
+#include "Generator/Public/Generators/IDAMappingGenerator.h"
+#include "Generator/Public/Generators/DumpspaceGenerator.h"
 
-#include "Generators/Generator.h"
+#include "Generator/Public/Generators/Generator.h"
 
 #import <Foundation/Foundation.h>
 
 #include "main.h"
 #include "Menu/Logger.h"
 
-#include "Unreal/NameArray.h"
-#include "Unreal/DeltaForce.h"
+#include "Engine/Public/Unreal/NameArray.h"
+#include "Engine/Public/Unreal/DeltaForce.h"
 
 namespace
 {
@@ -111,7 +111,7 @@ namespace
         const std::chrono::duration<double, std::milli> Elapsed = std::chrono::high_resolution_clock::now() - StartTime;
 
         LogSuccess("\n\nGenerating SDK took (%fms)\n", Elapsed.count());
-        LogSuccess("Output: %s/Documents/%s-%s/", Settings::Generator::SDKGenerationPath.empty() ? "~" : Settings::Generator::SDKGenerationPath.c_str(),
+        LogSuccess("Output: %s/Documents/%s-%s/", Settings::Generator::SDKGenerationPath ? Settings::Generator::SDKGenerationPath : "~",
             Settings::Generator::GameVersion.c_str(), Settings::Generator::GameName.c_str());
     }
 

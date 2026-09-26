@@ -3,16 +3,13 @@
 #include <filesystem>
 #include <concepts>
 
-#include "Unreal/ObjectArray.h"
-#include "Managers/DependencyManager.h"
-#include "Managers/MemberManager.h"
-#include "HashStringTable.h"
+#include "../../../Engine/Public/Unreal/ObjectArray.h"
+#include "../Managers/DependencyManager.h"
+#include "../Managers/MemberManager.h"
+#include "../HashStringTable.h"
 
 
 namespace fs = std::filesystem;
-
-void DumpEditorOnlyMetadata(const fs::path& DumperFolder);
-void DumpUEOffsetsHeader(const fs::path& DumperFolder);
 
 template<typename GeneratorType>
 concept GeneratorImplementation = requires(GeneratorType t)
@@ -46,7 +43,6 @@ private:
 private:
     static inline fs::path DumperFolder;
     static inline bool bDumpedGObjects = false;
-	static inline bool bDumepdEditorOnlyMetadata = false;
 
 public:
     /* Returns false (after logging the reason) if the engine core couldn't be initialized safely. */
@@ -76,14 +72,6 @@ public:
                 if (Settings::Internal::bUseFProperty)
                     ObjectArray::DumpObjectsWithProperties(DumperFolder);
             }
-
-            if (!bDumepdEditorOnlyMetadata)
-            {
-                bDumepdEditorOnlyMetadata = true;
-                DumpEditorOnlyMetadata(DumperFolder);
-            }
-
-            DumpUEOffsetsHeader(DumperFolder);
         }
 
         if (!SetupFolders(GeneratorType::MainFolderName, GeneratorType::MainFolder, GeneratorType::SubfolderName, GeneratorType::Subfolder))

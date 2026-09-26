@@ -3,8 +3,8 @@
 #include <vector>
 #include <unordered_map>
 
-#include "Unreal/Enums.h"
-#include "Unreal/UnrealTypes.h"
+#include "Enums.h"
+#include "UnrealTypes.h"
 
 class UEClass;
 class UEFField;
@@ -32,7 +32,7 @@ public:
 
 	void* GetAddress();
 
-	explicit operator bool() const;
+	operator bool() const;
 
 	EFieldClassID GetId() const;
 
@@ -68,7 +68,6 @@ public:
 	}
 
 	void* GetAddress();
-	const void* GetAddress() const;
 
 	EObjectFlags GetFlags() const;
 	class UEObject GetOwnerAsUObject() const;
@@ -77,8 +76,6 @@ public:
 	UEFFieldClass GetClass() const;
 	FName GetFName() const;
 	UEFField GetNext() const;
-
-	std::vector<std::pair<std::string, std::string>> GetMetaData() const;
 
 	template<typename UEType>
 	UEType Cast() const;
@@ -115,7 +112,6 @@ public:
 	UEObject(const UEObject&) = default;
 
 	void* GetAddress();
-	const void* GetAddress() const;
 
 	void* GetVft() const;
 	EObjectFlags GetFlags() const;
@@ -192,14 +188,8 @@ public:
 	UEStruct GetSuper() const;
 	UEField GetChild() const;
 	UEFField GetChildProperties() const;
+	int32 GetMinAlignment() const;
 	int32 GetStructSize() const;
-
-	/*
-	* The type of UStruct::MinAlignemnt was changed from int32 to int16 on UE5.6.
-	* 
-	* Using int16 in the dumper is likely fully backwards compatible, as I've never seen any class with a MinAlignment value greater than 0x10.
-	*/
-	int16 GetMinAlignment() const;
 
 	bool HasType(UEStruct Type) const;
 
@@ -257,12 +247,11 @@ public:
 
 public:
 	void* GetAddress();
-	const void* GetAddress() const;
 
 	std::pair<UEClass, UEFFieldClass> GetClass() const;
 	EClassCastFlags GetCastFlags() const;
 
-	explicit operator bool() const;
+	operator bool() const;
 
 	bool IsA(EClassCastFlags TypeFlags) const;
 
@@ -315,7 +304,6 @@ class UEBoolProperty : public UEProperty
 
 public:
 	uint8 GetFieldMask() const;
-	uint8 GetByteOffset() const;
 	uint8 GetBitIndex() const;
 	bool IsNativeBool() const;
 
@@ -459,7 +447,7 @@ class UEFieldPathProperty : public UEProperty
 	using UEProperty::UEProperty;
 
 public:
-	UEFFieldClass GetFieldClass() const;
+	UEFFieldClass GetFielClass() const;
 
 	std::string GetCppType() const;
 };

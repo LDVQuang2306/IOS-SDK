@@ -5,7 +5,7 @@
 #include <utility>
 #include <vector>
 
-#include "Unreal/DeltaForce.h"
+#include "../../Public/Unreal/DeltaForce.h"
 
 /* Internal to the Delta Force profile. Everything in here only reads memory through the kernel (never dereferences). */
 namespace DeltaForce::Discovery

@@ -87,8 +87,9 @@ public:
 class EnumManager
 {
 private:
-	friend struct EnumCollisionInfo;
+	friend class EnumCollisionInfo;
 	friend class EnumInfoHandle;
+	friend class EnumManagerTest;
 
 public:
 	using OverrideMaptType = std::unordered_map<int32 /* EnumIndex */, EnumInfo>;

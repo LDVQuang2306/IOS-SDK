@@ -1,5 +1,4 @@
-#include <algorithm>
-#include "Managers/EnumManager.h"
+#include "../../Public/Managers/EnumManager.h"
 
 namespace EnumInitHelper
 {
@@ -15,13 +14,13 @@ namespace EnumInitHelper
 			Size = 0x8;
 		}
 		else if (EnumValue > GetMaxOfType<uint16>()) {
-			Size = std::max<uint8>(Size, 0x4);
+			Size = fmax(Size, 0x4);
 		}
 		else if (EnumValue > GetMaxOfType<uint8>()) {
-			Size = std::max<uint8>(Size, 0x2);
+			Size = fmax(Size, 0x2);
 		}
 		else {
-			Size = std::max<uint8>(Size, 0x1);
+			Size = fmax(Size, 0x1);
 		}
 	}
 }
@@ -75,6 +74,7 @@ CollisionInfoIterator EnumInfoHandle::GetMemberCollisionInfoIterator() const
 {
 	return CollisionInfoIterator(Info->MemberInfos);
 }
+
 
 void EnumManager::InitInternal()
 {
@@ -146,13 +146,11 @@ void EnumManager::InitInternal()
 			for (int i = 0; i < NameValuePairs.size(); i++)
 			{
 				auto& [Name, Value] = NameValuePairs[i];
-					
+
 				UnrealString NameWitPrefix = Name.ToWString();
 
-				/* Include _MAX sentinels in EnumMaxValue: the emitted enum must hold them
-				 * too, so the underlying type has to be wide enough for the count, not
-				 * just for the highest "real" value. */
-				EnumMaxValue = std::max<int64>(EnumMaxValue, Value);
+				if (!NameWitPrefix.ends_with(TEXT("_MAX")))
+					EnumMaxValue = fmax(EnumMaxValue, Value);
 
 				auto [NameIndex, bWasInserted] = UniqueEnumValueNames.FindOrAdd(MakeNameValid(NameWitPrefix.substr(NameWitPrefix.find_last_of(TEXT("::")) + 1)));
 
@@ -192,12 +190,12 @@ void EnumManager::InitInternal()
 				NewOrExistingInfo.MemberInfos.push_back(CurrentEnumValueInfo);
 			}
 
-			/* Initialize / promote the size based on the highest value contained by this enum.
-			 * SetEnumSizeForValue uses std::max internally so it never shrinks an already-set size —
-			 * safe to call even when bWasInstanceFound is true (e.g. a uint8 property whose enum
-			 * carries a _MAX = 256 sentinel needs to be promoted to uint16). */
-			EnumInitHelper::SetEnumSizeForValue(NewOrExistingInfo.UnderlyingTypeSize, EnumMaxValue);
-			NewOrExistingInfo.bWasEnumSizeInitialized = true;
+			/* Initialize the size based on the highest value contained by this enum */
+			if (!NewOrExistingInfo.bWasEnumSizeInitialized && !NewOrExistingInfo.bWasInstanceFound)
+			{
+				EnumInitHelper::SetEnumSizeForValue(NewOrExistingInfo.UnderlyingTypeSize, EnumMaxValue);
+				NewOrExistingInfo.bWasEnumSizeInitialized = true;
+			}
 		}
 	}
 }
@@ -215,24 +213,6 @@ void EnumManager::InitIllegalNames()
 	IllegalNames.push_back(UniqueEnumValueNames.FindOrAdd("SIZE_MAX").first);
 	IllegalNames.push_back(UniqueEnumValueNames.FindOrAdd("RELATIVE").first);
 	IllegalNames.push_back(UniqueEnumValueNames.FindOrAdd("TRANSPARENT").first);
-	IllegalNames.push_back(UniqueEnumValueNames.FindOrAdd("NO_ERROR").first);
-	IllegalNames.push_back(UniqueEnumValueNames.FindOrAdd("EVENT_MAX").first);
-	IllegalNames.push_back(UniqueEnumValueNames.FindOrAdd("IGNORE").first);
-	IllegalNames.push_back(UniqueEnumValueNames.FindOrAdd("small").first);
-	/* Common preprocessor macros that would textually replace the enum value name */
-	IllegalNames.push_back(UniqueEnumValueNames.FindOrAdd("DEBUG").first);
-	IllegalNames.push_back(UniqueEnumValueNames.FindOrAdd("NDEBUG").first);
-	IllegalNames.push_back(UniqueEnumValueNames.FindOrAdd("NULL").first);
-	IllegalNames.push_back(UniqueEnumValueNames.FindOrAdd("NAN").first);
-	IllegalNames.push_back(UniqueEnumValueNames.FindOrAdd("INFINITY").first);
-	IllegalNames.push_back(UniqueEnumValueNames.FindOrAdd("min").first);
-	IllegalNames.push_back(UniqueEnumValueNames.FindOrAdd("max").first);
-
-	IllegalNames.push_back(UniqueEnumValueNames.FindOrAdd("short").first);
-	IllegalNames.push_back(UniqueEnumValueNames.FindOrAdd("long").first);
-	IllegalNames.push_back(UniqueEnumValueNames.FindOrAdd("int").first);
-	IllegalNames.push_back(UniqueEnumValueNames.FindOrAdd("signed").first);
-	IllegalNames.push_back(UniqueEnumValueNames.FindOrAdd("unsigned").first);
 }
 
 void EnumManager::Init()

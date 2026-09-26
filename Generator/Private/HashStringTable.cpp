@@ -1,8 +1,6 @@
-#include <format.h> // fmt: std::format is unavailable for the iOS 14 deployment target
-#include "HashStringTable.h"
+#include "../Public/HashStringTable.h"
+#include "../../Menu/Logger.h"
 
-
-#include "Menu/Logger.h"
 #pragma warning(suppress: 26495)
 HashStringTable::HashStringTable(uint32 InitialBucketSize)
 {
@@ -79,7 +77,7 @@ void HashStringTable::ResizeBucket(StringBucket& Bucket)
 template<typename CharType>
 std::pair<HashStringTableIndex, bool> HashStringTable::AddUnchecked(const CharType* Str, int32 Length, uint8 Hash)
 {
-    static_assert(std::is_same_v<CharType, char> || std::is_same_v<CharType, wchar_t>, "Invalid CharType! Type must be 'char' or 'wchar_t'.");
+    static_assert(std::is_same_v<CharType, char> || std::is_same_v<CharType, TCHAR>, "Invalid CharType! Type must be 'char' or 'wchar_t'.");
 
     const int32 LengthBytes = Length * sizeof(CharType);
 
@@ -171,8 +169,8 @@ inline std::pair<HashStringTableIndex, bool> HashStringTable::FindOrAdd(const Ch
 
     if (!Str || Length <= 0 || Length > StringEntry::MaxStringLength)
     {
-        LogError("%s", fmt::format("Error on line {{{:d}}}: {}\n", __LINE__, !Str ? "!Str" : Length <= 0 ? "Length <= 0" : "Length > MaxStringLength").c_str());
-        return { HashStringTableIndex(-1), false };
+        LogError("Error on line {%d}: %s\n", __LINE__, !Str ? "!Str" : Length <= 0 ? "Length <= 0" : "Length > MaxStringLength");
+        return { HashStringTableIndex::FromInt(-1), false };
     }
 
     uint8 Hash = SmallPearsonHash(Str);
@@ -228,16 +226,18 @@ void HashStringTable::DebugPrintStats() const
 
         TotalMemoryUsed += Bucket.Size;
         TotalMemoryAllocated += Bucket.SizeMax;
-
-        LogError("%s", fmt::format("Bucket[{:02d}] = {{ Data = {:p}, Size = {:05X}, SizeMax = {:05X} }}\n", i, static_cast<void*>(Bucket.Data), Bucket.Size, Bucket.SizeMax).c_str());
+        LogInfo("Bucket[%02d] = { Data = %p, Size = %05llX, SizeMax = %05llX }\n",
+            i,
+            static_cast<void*>(Bucket.Data),
+            static_cast<unsigned long long>(Bucket.Size),
+            static_cast<unsigned long long>(Bucket.SizeMax));
     }
 
-    LogError("");
+    LogInfo("\n");
 
-    LogError("%s", fmt::format("TotalMemoryUsed: {:X}\n", TotalMemoryUsed).c_str());
-    LogError("%s", fmt::format("TotalMemoryAllocated: {:X}\n", TotalMemoryAllocated).c_str());
-    LogError("%s", fmt::format("Percentage of allocation in use: {:.3f}\n", static_cast<double>(TotalMemoryUsed) / TotalMemoryAllocated).c_str());
-
-    LogError("\n");
+    LogInfo("TotalMemoryUsed: %llX\n", static_cast<unsigned long long>(TotalMemoryUsed));
+    LogInfo("TotalMemoryAllocated: %llX\n", static_cast<unsigned long long>(TotalMemoryAllocated));
+    
+    /* %.3f limits the float/double to 3 decimal places (Matches {:.3f}) */
+    LogInfo("Percentage of allocation in use: %.3f\n\n", static_cast<double>(TotalMemoryUsed) / TotalMemoryAllocated);
 }
-

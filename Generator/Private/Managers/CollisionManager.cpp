@@ -1,7 +1,6 @@
-#include <format.h> // fmt: std::format is unavailable for the iOS 14 deployment target
-#include "Managers/CollisionManager.h"
+#include "../../Public/Managers/CollisionManager.h"
+#include <format.h>
 
-#include "Menu/Logger.h"
 NameInfo::NameInfo(HashStringTableIndex NameIdx, ECollisionType CurrentType)
 	: Name(NameIdx), CollisionData(0x0)
 {
@@ -22,7 +21,7 @@ void NameInfo::InitCollisionData(const NameInfo& Existing, ECollisionType Curren
 			SuperMemberNameCollisionCount++;
 			return;
 		}
-		MemberNameCollisionCount = Existing.MemberNameCollisionCount + 1;
+		MemberNameCollisionCount++;
 		break;
 	case ECollisionType::FunctionName:
 		if (bIsSuper)
@@ -30,10 +29,10 @@ void NameInfo::InitCollisionData(const NameInfo& Existing, ECollisionType Curren
 			SuperFuncNameCollisionCount++;
 			return;
 		}
-		FunctionNameCollisionCount = Existing.FunctionNameCollisionCount + 1;
+		FunctionNameCollisionCount++;
 		break;
 	case ECollisionType::ParameterName:
-		ParamNameCollisionCount = Existing.ParamNameCollisionCount + 1;
+		ParamNameCollisionCount++;
 		break;
 	default:
 		break;
@@ -241,7 +240,7 @@ void CollisionManager::AddStructToNameContainer(UEStruct Struct, bool bIsStruct)
 		const auto [It, bInserted] = TranslationMap.emplace(KeyFunctions::GetKeyForCollisionInfo(Struct, Member), Index);
 		
 		if (!bInserted)
-			LogError("%s", fmt::format("Error, no insertion took place, key {{0x{:X}}} duplicated!", KeyFunctions::GetKeyForCollisionInfo(Struct, Member)).c_str());
+			std::cout << "Error, no insertion took place, key {0x" << std::hex << KeyFunctions::GetKeyForCollisionInfo(Struct, Member) << "} duplicated!" << std::endl;
 	};
 
 	for (UEProperty Prop : Struct.GetProperties())
@@ -262,7 +261,7 @@ std::string CollisionManager::StringifyName(UEStruct Struct, NameInfo Info)
 
 	std::string Name = MemberNames.GetStringEntry(Info.Name).GetName();
 
-	//LogError("%s", fmt::format("Nm: {}\nInfo:{}\n", Name, Info.DebugStringify()).c_str());
+	//std::cout << "Nm: " << Name << "\nInfo:" << Info.DebugStringify() << "\n";
 
 	// Order of sub-if-statements matters
 	if (OwnCollisionType == ECollisionType::MemberName)
