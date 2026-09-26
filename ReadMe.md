@@ -64,6 +64,25 @@ The layout comes from the validated reference dumper (`DFSDKDumper`). When the g
 5. Cast flags are resolved from class names (no unverified `UClass::CastFlags` offset). Nothing calls game code (no ProcessEvent during the dump).
 6. The SDK contains the name decryption (`DeltaForceNames::DecryptAnsi/DecryptWide`) and the Delta Force FNamePool layout, so `FName::ToString()` works in the generated SDK.
 
+### Generated SDK (clang / iOS)
+
+The generated SDK is built with Apple's C++ ABI in mind and every struct/class keeps its `static_assert`s for size, alignment and member offsets, so a wrong layout is a compile error instead of a silent wrong read:
+
+* **Tail padding reuse**: the game places members of a derived struct/class inside the tail padding of its base (e.g. `FTTPropertyTrack::PropertyName` @0x14 inside `FTTTrackBase`, `URaidScreenMarkerView::bNeedShowDistance` @0x3EA). clang only does that for non-POD bases, so those bases get a user-provided constructor. Every other type is padded up to its full size, and types without own members (e.g. `UCommonHUDView`, `ADFMWeaponC4`) are padded too, so derived types always start where the game starts them.
+* **Enums**: negative values make the enum signed (`ESwitchOnOff : int8 { Unknown = -1 }`), reflection-only `_MAX` values that don't fit the real type (`= 256` in a `uint8` enum) are emitted as a comment.
+* **Cyclic packages**: structs used inside `TArray/TSet/TMap` of a package that can't be included (e.g. `TMap<uint64, FWeaponDataModifyFunction>`) use `TStructCycleFixup<...>` like plain struct members, and enums used inside containers are forward declared (`TMap<EHeroShapeShiftType, ...>`).
+* `TUObjectArray` only contains the members whose offset is known, `PropertyFixup.hpp` uses `unsigned char` (no MSVC `__int8`), `UObject::IsDefaultObject()` checks the `Default__` name when `UObject::Flags` can't be identified.
+
+To check a dump, build its SDK for arm64 iOS with theos (see `Tests/SDKTheos/Makefile`):
+
+```sh
+cd Tests/SDKTheos
+make SDK_DIR=/path/to/1.203.37117_65-DeltaForce/CppSDK            # Basic.cpp + CoreUObject/Engine functions
+make SDK_DIR=/path/to/1.203.37117_65-DeltaForce/CppSDK SDK_ALL=1  # every <Package>_functions.cpp
+```
+
+`Tests/LinuxHarness/run.sh` dumps a synthetic Delta Force process that contains all of the layouts above and compiles the generated SDK (set `IOS_SDK=/path/to/iPhoneOS.sdk` to also compile it for `arm64-apple-ios`).
+
 Usage: open the game, **wait until the lobby is fully loaded**, then press *Start Dump*. If it reports that GNames/GObjects were not found, wait a bit longer and press it again (nothing is written before the engine core validated).
 
 Optional manual override (validated before use) in `Settings.h`:

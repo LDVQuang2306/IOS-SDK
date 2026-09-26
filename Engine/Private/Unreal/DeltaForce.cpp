@@ -417,7 +417,8 @@ namespace
 				(bIsCDO ? NumCDOsWithFlag : NumOthersWithFlag) += bHasFlag;
 			}
 
-			if (NumCDOs >= 16 && NumCDOsWithFlag == NumCDOs && NumOthersWithFlag * 200 <= NumOthers)
+			/* Tolerate a few objects that are still being constructed/destroyed while the dump runs */
+			if (NumCDOs >= 16 && NumCDOsWithFlag * 100 >= NumCDOs * 99 && NumOthersWithFlag * 200 <= NumOthers)
 				return Offset;
 		}
 
@@ -746,16 +747,17 @@ namespace
 				FreeSlots.push_back(Offset);
 		}
 
-		Layout.MaxElementsOffset = Layout.NumElementsOffset;
-		Layout.MaxChunksOffset = Layout.NumChunksOffset;
+		/* -1 = unknown. (The old fallback 'Max = Num' made the SDK emit two members at the same offset, TUObjectArray didn't compile.) */
+		Layout.MaxElementsOffset = -1;
+		Layout.MaxChunksOffset = -1;
 
 		for (const int32 Offset : FreeSlots)
 		{
 			const int32 Value = SafeRead<int32>(GObjects + Offset);
 
-			if (Layout.MaxElementsOffset == Layout.NumElementsOffset && Value >= NumElements && Value > 0x10000)
+			if (Layout.MaxElementsOffset == -1 && Value >= NumElements && Value > 0x10000)
 				Layout.MaxElementsOffset = Offset;
-			else if (Layout.MaxChunksOffset == Layout.NumChunksOffset && Value >= NumChunks && Value <= 0x400)
+			else if (Layout.MaxChunksOffset == -1 && Value >= NumChunks && Value <= 0x400)
 				Layout.MaxChunksOffset = Offset;
 		}
 
